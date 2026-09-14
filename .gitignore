@@ -1,0 +1,11 @@
+bin/
+*.exe
+*.db
+*.db-wal
+*.db-shm
+*.tmp
+*.log
+.staging/
+music_library/
+test_nas_music/
+scratch/
