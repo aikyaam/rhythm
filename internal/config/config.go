@@ -45,11 +45,19 @@ type KeybindingsConfig struct {
 	Quit       string `json:"quit"`
 }
 
+type ImageConfig struct {
+	Protocol string `json:"protocol"`
+	Width    int    `json:"width"`
+	Height   int    `json:"height"`
+}
+
 type Config struct {
+	Theme        string              `json:"theme"`
 	Audio        AudioConfig         `json:"audio"`
 	Library      LibraryConfig       `json:"library"`
 	Cache        CacheConfig         `json:"cache"`
 	Keybindings  KeybindingsConfig   `json:"keybindings"`
+	Image        ImageConfig         `json:"image"`
 	Servers      []core.ServerConfig `json:"servers"`
 	ActiveServer string              `json:"active_server_id"`
 }
@@ -60,6 +68,7 @@ func DefaultConfig() *Config {
 	cacheDir := filepath.Join(GetAppDir(), "cache")
 
 	return &Config{
+		Theme: "tokyo-night",
 		Audio: AudioConfig{
 			Volume:  80,
 			Shuffle: false,
@@ -91,6 +100,11 @@ func DefaultConfig() *Config {
 			QueueView:  "q",
 			Help:       "?",
 			Quit:       "ctrl+c",
+		},
+		Image: ImageConfig{
+			Protocol: "sixel",
+			Width:    22,
+			Height:   11,
 		},
 		Servers:      []core.ServerConfig{},
 		ActiveServer: "",

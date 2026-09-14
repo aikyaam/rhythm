@@ -2,6 +2,7 @@ package metadata
 
 import (
 	"bytes"
+	"encoding/json"
 	"fmt"
 	"image"
 	"image/color"
@@ -11,6 +12,7 @@ import (
 	"io"
 	"math"
 	"net/http"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
@@ -24,7 +26,8 @@ import (
 type ArtMode int
 
 const (
-	ArtModeASCIIView ArtMode = iota
+	ArtModeHalfBlock ArtMode = iota
+	ArtModeASCIIView
 	ArtModeCyberpunkASCII
 	ArtModeBraille
 )
@@ -77,6 +80,8 @@ func GenerateArtwork(track *core.Track, targetWidth, targetHeight int, mode ArtM
 
 	var lines []string
 	switch mode {
+	case ArtModeHalfBlock:
+		lines = ImageToHalfBlock(img, targetWidth, targetHeight)
 	case ArtModeCyberpunkASCII:
 		lines = ImageToCyberpunkASCII(img, targetWidth, targetHeight)
 	case ArtModeBraille:
@@ -84,7 +89,7 @@ func GenerateArtwork(track *core.Track, targetWidth, targetHeight int, mode ArtM
 	case ArtModeASCIIView:
 		lines = ImageToASCIIView(img, targetWidth, targetHeight)
 	default:
-		lines = ImageToASCIIView(img, targetWidth, targetHeight)
+		lines = ImageToHalfBlock(img, targetWidth, targetHeight)
 	}
 
 	if len(lines) == 0 {
@@ -96,6 +101,83 @@ func GenerateArtwork(track *core.Track, targetWidth, targetHeight int, mode ArtM
 	artCacheMu.Unlock()
 
 	return lines, nil
+}
+
+func visibleWidth(s string) int {
+	inEscape := false
+	w := 0
+	for _, r := range s {
+		if r == 0x1b {
+			inEscape = true
+			continue
+		}
+		if inEscape {
+			if (r >= 'A' && r <= 'Z') || (r >= 'a' && r <= 'z') {
+				inEscape = false
+			}
+			continue
+		}
+		w++
+	}
+	return w
+}
+
+func GenerateFallbackArtwork(targetWidth, targetHeight int, title, artist string) []string {
+	if targetWidth <= 0 || targetHeight <= 0 {
+		return nil
+	}
+
+	vinylLines := []string{
+		"\x1b[38;2;86;95;137m   .──────────────.   \x1b[0m",
+		"\x1b[38;2;86;95;137m  /  \x1b[38;2;122;162;247m.──────────.\x1b[38;2;86;95;137m  \\  \x1b[0m",
+		"\x1b[38;2;86;95;137m /  \x1b[38;2;122;162;247m/   \x1b[38;2;125;207;255m.────.\x1b[38;2;122;162;247m   \\  \x1b[38;2;86;95;137m\\ \x1b[0m",
+		"\x1b[38;2;86;95;137m│  \x1b[38;2;122;162;247m│   \x1b[38;2;125;207;255m/  ●   \\\x1b[38;2;122;162;247m   │  \x1b[38;2;86;95;137m│\x1b[0m",
+		"\x1b[38;2;86;95;137m│  \x1b[38;2;122;162;247m│  \x1b[38;2;125;207;255m│  \x1b[1;38;2;187;154;247m(✦)\x1b[0m\x1b[38;2;125;207;255m   │\x1b[38;2;122;162;247m  │  \x1b[38;2;86;95;137m│\x1b[0m",
+		"\x1b[38;2;86;95;137m│  \x1b[38;2;122;162;247m│   \x1b[38;2;125;207;255m\\  ●   /\x1b[38;2;122;162;247m   │  \x1b[38;2;86;95;137m│\x1b[0m",
+		"\x1b[38;2;86;95;137m \\  \x1b[38;2;122;162;247m\\   \x1b[38;2;125;207;255m`────'\x1b[38;2;122;162;247m   /  \x1b[38;2;86;95;137m/ \x1b[0m",
+		"\x1b[38;2;86;95;137m  \\  \x1b[38;2;122;162;247m`──────────'\x1b[38;2;86;95;137m  /  \x1b[0m",
+		"\x1b[38;2;86;95;137m   `──────────────'   \x1b[0m",
+	}
+
+	padTop := (targetHeight - len(vinylLines)) / 2
+	if padTop < 0 {
+		padTop = 0
+	}
+
+	var res []string
+	emptyLine := strings.Repeat(" ", targetWidth)
+	for i := 0; i < padTop; i++ {
+		res = append(res, emptyLine)
+	}
+
+	for _, vl := range vinylLines {
+		if len(res) >= targetHeight {
+			break
+		}
+		w := visibleWidth(vl)
+		padLeft := (targetWidth - w) / 2
+		if padLeft < 0 {
+			padLeft = 0
+		}
+		padRight := targetWidth - w - padLeft
+		if padRight < 0 {
+			padRight = 0
+		}
+		res = append(res, strings.Repeat(" ", padLeft)+vl+strings.Repeat(" ", padRight))
+	}
+
+	for len(res) < targetHeight {
+		res = append(res, emptyLine)
+	}
+	return res
+}
+
+func GetTrackCoverThumbnail(track *core.Track, targetWidth, targetHeight int) []string {
+	return GetTrackCoverThumbnailProto(track, targetWidth, targetHeight, ProtocolSixel)
+}
+
+func GetCachedThumbnail(track *core.Track, targetWidth, targetHeight int) []string {
+	return GetCachedThumbnailProto(track, targetWidth, targetHeight, ProtocolSixel)
 }
 
 func GenerateArtworkASCII(track *core.Track, targetWidth, targetHeight int) ([]string, error) {
@@ -166,15 +248,164 @@ func GetTrackArtworkPathOrURL(track *core.Track) string {
 	return artURL
 }
 
-func loadTrackImage(track *core.Track) (image.Image, error) {
+func fetchImageURL(u string) (image.Image, error) {
+	if u == "" {
+		return nil, fmt.Errorf("empty url")
+	}
+	req, err := http.NewRequest(http.MethodGet, u, nil)
+	if err != nil {
+		return nil, err
+	}
+	req.Header.Set("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36")
+	resp, err := httpClient.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("http error: %d", resp.StatusCode)
+	}
+	data, err := io.ReadAll(resp.Body)
+	if err != nil || len(data) == 0 {
+		return nil, fmt.Errorf("read body failed: %v", err)
+	}
+	img, _, err := image.Decode(bytes.NewReader(data))
+	return img, err
+}
 
+type iTunesSearchResult struct {
+	ResultCount int `json:"resultCount"`
+	Results     []struct {
+		ArtworkUrl100 string `json:"artworkUrl100"`
+	} `json:"results"`
+}
+
+func cleanMusicQuery(artist, title string) string {
+	q := title
+	if artist != "" && !strings.Contains(strings.ToLower(title), strings.ToLower(artist)) && !strings.EqualFold(artist, "Coke Studio India") {
+		q = artist + " " + title
+	}
+	re := []string{
+		"(official video)", "(official music video)", "[official video]", "[official music video]",
+		"(lyrics)", "[lyrics]", "(lyric video)", "[lyric video]",
+		"(audio)", "[audio]", "(visualizer)", "[visualizer]",
+		"official video", "official audio", "coke studio india", "coke studio",
+	}
+	lower := strings.ToLower(q)
+	for _, r := range re {
+		lower = strings.ReplaceAll(lower, r, "")
+	}
+	lower = strings.ReplaceAll(lower, "|", " ")
+	lower = strings.ReplaceAll(lower, "-", " ")
+	lower = strings.Join(strings.Fields(lower), " ")
+	return lower
+}
+
+func fetchOfficialAlbumArt(artist, title string) string {
+	q := cleanMusicQuery(artist, title)
+	if q == "" {
+		return ""
+	}
+	endpoint := fmt.Sprintf("https://itunes.apple.com/search?term=%s&entity=song&limit=1", url.QueryEscape(q))
+	req, err := http.NewRequest(http.MethodGet, endpoint, nil)
+	if err != nil {
+		return ""
+	}
+	req.Header.Set("User-Agent", "Mozilla/5.0")
+	resp, err := httpClient.Do(req)
+	if err != nil {
+		return ""
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return ""
+	}
+	var res iTunesSearchResult
+	if err := json.NewDecoder(resp.Body).Decode(&res); err != nil || len(res.Results) == 0 {
+		return ""
+	}
+	art := res.Results[0].ArtworkUrl100
+	if art != "" {
+		art = strings.ReplaceAll(art, "100x100bb", "600x600bb")
+		return art
+	}
+	return ""
+}
+
+func cropToCenterSquare(img image.Image) image.Image {
+	if img == nil {
+		return nil
+	}
+	bounds := img.Bounds()
+	w := bounds.Dx()
+	h := bounds.Dy()
+	if w <= 0 || h <= 0 {
+		return img
+	}
+
+	minY := bounds.Min.Y
+	maxY := bounds.Max.Y
+
+	if w == 480 && h == 360 {
+		minY += 45
+		maxY -= 45
+		h = maxY - minY
+	} else {
+		for y := bounds.Min.Y; y < bounds.Min.Y+h/4; y++ {
+			if !isRowBlack(img, bounds.Min.X, bounds.Max.X, y) {
+				minY = y
+				break
+			}
+		}
+		for y := bounds.Max.Y - 1; y > bounds.Max.Y-h/4; y-- {
+			if !isRowBlack(img, bounds.Min.X, bounds.Max.X, y) {
+				maxY = y + 1
+				break
+			}
+		}
+		if maxY > minY+10 {
+			h = maxY - minY
+		}
+	}
+
+	side := h
+	if w < side {
+		side = w
+	}
+	startX := bounds.Min.X + (w-side)/2
+	startY := minY + (h-side)/2
+
+	type subImager interface {
+		SubImage(r image.Rectangle) image.Image
+	}
+	if si, ok := img.(subImager); ok {
+		return si.SubImage(image.Rect(startX, startY, startX+side, startY+side))
+	}
+	return img
+}
+
+func isRowBlack(img image.Image, minX, maxX, y int) bool {
+	step := (maxX - minX) / 10
+	if step < 1 {
+		step = 1
+	}
+	for x := minX; x < maxX; x += step {
+		r, g, b, _ := img.At(x, y).RGBA()
+		if (r>>8) > 40 || (g>>8) > 40 || (b>>8) > 40 {
+			return false
+		}
+	}
+	return true
+}
+
+func loadTrackImage(track *core.Track) (image.Image, error) {
 	if track.LocalPath != "" {
 		if f, err := os.Open(track.LocalPath); err == nil {
 			m, err := tag.ReadFrom(f)
 			f.Close()
 			if err == nil && m != nil && m.Picture() != nil && len(m.Picture().Data) > 0 {
 				if img, _, err := image.Decode(bytes.NewReader(m.Picture().Data)); err == nil {
-					return img, nil
+					return cropToCenterSquare(img), nil
 				}
 			}
 		}
@@ -187,32 +418,32 @@ func loadTrackImage(track *core.Track) (image.Image, error) {
 				img, _, err := image.Decode(f)
 				f.Close()
 				if err == nil && img != nil {
-					return img, nil
+					return cropToCenterSquare(img), nil
 				}
+			}
+		}
+	}
+
+	if track.Title != "" {
+		if officialURL := fetchOfficialAlbumArt(track.Artist, track.Title); officialURL != "" {
+			if img, err := fetchImageURL(officialURL); err == nil && img != nil {
+				return cropToCenterSquare(img), nil
 			}
 		}
 	}
 
 	artURL := track.ArtworkURL
 	if artURL == "" && len(track.SourceID) == 11 {
-		artURL = fmt.Sprintf("https://i.ytimg.com/vi/%s/hqdefault.jpg", track.SourceID)
+		artURL = fmt.Sprintf("https://i.ytimg.com/vi/%s/maxresdefault.jpg", track.SourceID)
 	}
 
 	if artURL != "" {
-		req, err := http.NewRequest(http.MethodGet, artURL, nil)
-		if err == nil {
-			req.Header.Set("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36")
-			resp, err := httpClient.Do(req)
-			if err == nil {
-				defer resp.Body.Close()
-				if resp.StatusCode == http.StatusOK {
-					data, err := io.ReadAll(resp.Body)
-					if err == nil && len(data) > 0 {
-						if img, _, err := image.Decode(bytes.NewReader(data)); err == nil {
-							return img, nil
-						}
-					}
-				}
+		if img, err := fetchImageURL(artURL); err == nil && img != nil {
+			return cropToCenterSquare(img), nil
+		}
+		if strings.Contains(artURL, "maxresdefault.jpg") && len(track.SourceID) == 11 {
+			if img, err := fetchImageURL(fmt.Sprintf("https://i.ytimg.com/vi/%s/hqdefault.jpg", track.SourceID)); err == nil && img != nil {
+				return cropToCenterSquare(img), nil
 			}
 		}
 	}

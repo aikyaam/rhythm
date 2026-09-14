@@ -267,7 +267,7 @@ func fetchLRCLIB(track *core.Track) (*Lyrics, error) {
 
 	reqURL := fmt.Sprintf("%s?%s", endpoint, params.Encode())
 	if req, err := http.NewRequest("GET", reqURL, nil); err == nil {
-		req.Header.Set("User-Agent", "RhythmRhythmMusicPlayer/1.0 (https://github.com/aome510/spotify-player-inspired)")
+		req.Header.Set("User-Agent", "RhythmRhythmMusicPlayer/1.0 (https://github.com/aikyaam/rhythm)")
 		if resp, err := httpClient.Do(req); err == nil {
 			defer resp.Body.Close()
 			if resp.StatusCode == http.StatusOK {

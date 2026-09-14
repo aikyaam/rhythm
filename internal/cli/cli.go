@@ -22,6 +22,7 @@ import (
 	"rhythm/internal/queue"
 	"rhythm/internal/remote"
 	"rhythm/internal/storage"
+
 	"github.com/google/uuid"
 )
 
@@ -140,36 +141,32 @@ func printHelp() {
 
 func runDoctor(svc *AppServices) {
 	fmt.Println("RHYTHM SYSTEM DIAGNOSTICS")
-	fmt.Println("==========================")
 
 	if svc.Audio.NativeAvailable() {
-		fmt.Println("✓ Audio Engine: Windows Native Hardware Player (WinRT MediaPlayer - AAC/MP4/FLAC/MP3/Opus)")
+		fmt.Println("Audio Engine: Windows Native Hardware Player (WinRT MediaPlayer - AAC/MP4/FLAC/MP3/Opus)")
 	} else if svc.Audio.State() != "" {
-		fmt.Println("✓ Audio Engine: Initialized (Beep / Speaker Output)")
+		fmt.Println("Audio Engine: Initialized (Beep / Speaker Output)")
 	} else {
-		fmt.Println("✗ Audio Engine: Failed")
+		fmt.Println("Audio Engine: Failed")
 	}
 
 	if err := svc.DB.SaveTrack(&core.Track{ID: "doctor-probe", Title: "Probe", Artist: "Test", Source: core.SourceLocal}); err == nil {
-		fmt.Println("✓ Database: SQLite operational with migrations")
+		fmt.Println("Database: SQLite operational with migrations")
 	} else {
-		fmt.Printf("✗ Database: %v\n", err)
+		fmt.Printf("Database: %v\n", err)
 	}
-
-	fmt.Println("✓ Online Providers: Native NodeLink InnerTube (YouTube), JioSaavn REST (320kbps), and Spotify (No yt-dlp required)")
-
 	for _, p := range svc.Config.Library.Paths {
 		if fi, err := os.Stat(p); err == nil && fi.IsDir() {
-			fmt.Printf("✓ Music Directory: Found (%s)\n", p)
+			fmt.Printf("Music Directory: Found (%s)\n", p)
 		} else {
-			fmt.Printf("! Music Directory: Missing or unreadable (%s)\n", p)
+			fmt.Printf("Music Directory: Missing or unreadable (%s)\n", p)
 		}
 	}
 
-	fmt.Printf("✓ Configuration: %s\n", config.GetConfigFilePath())
+	fmt.Printf("Configuration: %s\n", config.GetConfigFilePath())
 
 	servers, _ := svc.DB.GetServers()
-	fmt.Printf("• Configured NAS Servers: %d\n", len(servers))
+	fmt.Printf("Configured NAS Servers: %d\n", len(servers))
 }
 
 func runStatus(svc *AppServices) {
@@ -178,12 +175,11 @@ func runStatus(svc *AppServices) {
 	servers, _ := svc.DB.GetServers()
 
 	fmt.Println("RHYTHM STATUS")
-	fmt.Println("==============")
-	fmt.Printf("• Local Tracks Indexed: %d\n", len(tracks))
-	fmt.Printf("• Favorites Stored    : %d\n", len(favs))
-	fmt.Printf("• Remote NAS Servers  : %d\n", len(servers))
-	fmt.Printf("• Audio Volume        : %d%%\n", svc.Audio.Volume())
-	fmt.Printf("• Cache Usage         : %s\n", svc.Cache.FormattedStats())
+	fmt.Printf("Local Tracks Indexed: %d\n", len(tracks))
+	fmt.Printf("Favorites Stored    : %d\n", len(favs))
+	fmt.Printf("Remote NAS Servers  : %d\n", len(servers))
+	fmt.Printf("Audio Volume        : %d%%\n", svc.Audio.Volume())
+	fmt.Printf("Cache Usage         : %s\n", svc.Cache.FormattedStats())
 }
 
 func runLibrary(svc *AppServices, args []string) {
@@ -200,7 +196,7 @@ func runLibrary(svc *AppServices, args []string) {
 			fmt.Printf("Scan error: %v\n", err)
 			return
 		}
-		fmt.Printf("✓ Scan Complete! Scanned: %d | Added: %d | Updated: %d | Errors: %d\n",
+		fmt.Printf("Scan Complete! Scanned: %d | Added: %d | Updated: %d | Errors: %d\n",
 			stats.TotalScanned, stats.NewAdded, stats.Updated, stats.Errors)
 
 	case "list":
@@ -481,31 +477,31 @@ func runServer(svc *AppServices, args []string) {
 		test := svc.Remote.TestConnection(srv)
 
 		if test.Reachable {
-			fmt.Println("  ✓ Server reachable")
+			fmt.Println("Server reachable")
 		} else {
-			fmt.Printf("  ✗ Server unreachable: %s\n", test.ErrorMessage)
+			fmt.Printf("Server unreachable: %s\n", test.ErrorMessage)
 			return
 		}
 
 		if test.Authenticated {
-			fmt.Println("  ✓ Authentication successful")
+			fmt.Println("Authentication successful")
 		} else {
-			fmt.Printf("  ✗ Authentication failed: %s\n", test.ErrorMessage)
+			fmt.Printf("Authentication failed: %s\n", test.ErrorMessage)
 			return
 		}
 
 		if test.LibraryAvailable {
-			fmt.Printf("  ✓ Music library available (%d tracks indexed on server)\n", test.TotalTracks)
+			fmt.Printf("Music library available (%d tracks indexed on server)\n", test.TotalTracks)
 		}
 		if test.StreamingSupported {
-			fmt.Println("  ✓ Audio streaming supported")
+			fmt.Println("Audio streaming supported")
 		}
 		if test.AcquisitionSupported {
-			fmt.Println("  ✓ Remote acquisition supported")
+			fmt.Println("Remote acquisition supported")
 		}
 
 		_ = svc.DB.SaveServer(srv)
-		fmt.Printf("\n✓ '%s' added successfully! NAS menu is now unlocked.\n", name)
+		fmt.Printf("'%s' added successfully! NAS menu is now unlocked.\n", name)
 
 	case "status":
 		servers, _ := svc.DB.GetServers()
@@ -541,7 +537,7 @@ func runServer(svc *AppServices, args []string) {
 			return
 		}
 		resp.Body.Close()
-		fmt.Printf("✓ '%s' library scan & refresh triggered!\n", srv.Name)
+		fmt.Printf("'%s' library scan & refresh triggered!\n", srv.Name)
 
 	case "browse":
 		servers, _ := svc.DB.GetServers()
@@ -602,7 +598,7 @@ func runServer(svc *AppServices, args []string) {
 			return
 		}
 
-		fmt.Printf("✓ Remote Job Queued on NAS! Job ID: %s (Status: %s)\n", job.ID, job.Status)
+		fmt.Printf("Remote Job Queued on NAS! Job ID: %s (Status: %s)\n", job.ID, job.Status)
 		fmt.Println("  (The NAS server is now downloading and organizing the audio independently)")
 	}
 }

@@ -36,9 +36,6 @@ func main() {
 		log.Fatalf("Failed to initialize Rhythm server: %v", err)
 	}
 
-	fmt.Println("============================================================")
-	fmt.Println("             RHYTHM REMOTE MUSIC SERVER / NAS              ")
-	fmt.Println("============================================================")
 	fmt.Printf("  • Listening Port : %d\n", *port)
 	fmt.Printf("  • Music Root     : %s\n", absMusicDir)
 	fmt.Printf("  • Database       : %s\n", absDBPath)
@@ -48,8 +45,7 @@ func main() {
 		fmt.Println("  • Auth Enabled   : No (Public Local Network Mode)")
 	}
 	fmt.Println("  • Capabilities   : [streaming, acquisition, library]")
-	fmt.Println("============================================================")
-	fmt.Printf("✓ Server is ready. Stream URL: http://localhost:%d\n\n", *port)
+	fmt.Printf("Server is ready. Stream URL: http://localhost:%d\n\n", *port)
 
 	sigChan := make(chan os.Signal, 1)
 	signal.Notify(sigChan, os.Interrupt, syscall.SIGTERM)

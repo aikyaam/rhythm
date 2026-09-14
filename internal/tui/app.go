@@ -3,16 +3,21 @@ package tui
 import (
 	"fmt"
 	"math"
+	"math/rand"
 	"path/filepath"
+	"sort"
 	"strings"
 	"time"
 
 	"rhythm/internal/cli"
+	"rhythm/internal/config"
 	"rhythm/internal/core"
 	"rhythm/internal/graphics"
 	"rhythm/internal/lyrics"
 	"rhythm/internal/metadata"
 	"rhythm/internal/providers"
+	"rhythm/internal/theme"
+
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
 )
@@ -31,6 +36,16 @@ const (
 	ViewSettings
 )
 
+type PopupMode int
+
+const (
+	PopupNone PopupMode = iota
+	PopupActions
+	PopupTheme
+	PopupHelp
+	PopupPlaylistSelect
+)
+
 type Model struct {
 	svc         *cli.AppServices
 	currentView ViewMode
@@ -40,6 +55,19 @@ type Model struct {
 	statusMsg   string
 	statusTime  time.Time
 	animFrame   int
+
+	currentTheme     theme.Theme
+	popup            PopupMode
+	popupCursor      int
+	popupActionTrack *core.Track
+	lyricOffset      time.Duration
+	prevVolume       int
+	showThumbnail    bool
+	imageProtocol    metadata.ImageProtocol
+	thumbnailTrackID string
+	thumbnailLines   []string
+	lastKey          string
+	lastKeyEvent     time.Time
 
 	libraryTracks   []core.Track
 	onlineTracks    []core.Track
@@ -112,6 +140,25 @@ func loadLyricsCmd(track *core.Track) tea.Cmd {
 	}
 }
 
+type thumbnailLoadedMsg struct {
+	trackID string
+	lines   []string
+}
+
+func loadThumbnailCmd(track *core.Track, w, h int, proto metadata.ImageProtocol) tea.Cmd {
+	if track == nil {
+		return nil
+	}
+	tr := *track
+	return func() tea.Msg {
+		lines := metadata.GetTrackCoverThumbnailProto(&tr, w, h, proto)
+		return thumbnailLoadedMsg{
+			trackID: tr.ID,
+			lines:   lines,
+		}
+	}
+}
+
 func unifiedSearchCmd(svc *cli.AppServices, query string) tea.Cmd {
 	return func() tea.Msg {
 		clean := strings.TrimSpace(query)
@@ -155,23 +202,102 @@ func unifiedSearchCmd(svc *cli.AppServices, query string) tea.Cmd {
 	}
 }
 
+var (
+	currentThemeTheme   theme.Theme
+	headerStyle         lipgloss.Style
+	navActiveStyle      lipgloss.Style
+	navInactiveStyle    lipgloss.Style
+	selectedRowStyle    lipgloss.Style
+	normalRowStyle      lipgloss.Style
+	dimStyle            lipgloss.Style
+	cyanStyle           lipgloss.Style
+	boxBorder           lipgloss.Style
+	lyricsPlayingStyle  lipgloss.Style
+	lyricsPlayingArrow  lipgloss.Style
+	lyricsPlayedStyle   lipgloss.Style
+	lyricsNextStyle     lipgloss.Style
+	lyricsUpcomingStyle lipgloss.Style
+	badgeLocal          lipgloss.Style
+	badgeYouTube        lipgloss.Style
+	badgeSpotify        lipgloss.Style
+	badgeJioSaavn       lipgloss.Style
+)
+
+func applyTheme(t theme.Theme) {
+	currentThemeTheme = t
+	pal := theme.NewPalette(t)
+	headerStyle = pal.Header
+	navActiveStyle = pal.NavActive
+	navInactiveStyle = pal.NavInactive
+	selectedRowStyle = pal.SelectedRow
+	normalRowStyle = pal.NormalRow
+	dimStyle = pal.Dim
+	cyanStyle = pal.Accent
+	boxBorder = pal.Border
+	lyricsPlayingStyle = pal.LyricPlaying
+	lyricsPlayingArrow = pal.PlayingArrow
+	lyricsPlayedStyle = pal.LyricPlayed
+	lyricsNextStyle = pal.LyricNext
+	lyricsUpcomingStyle = pal.LyricUp
+
+	badgeLocal = lipgloss.NewStyle().
+		Foreground(lipgloss.Color("#1a1b26")).
+		Background(lipgloss.Color("#9ece6a")).
+		Bold(true).
+		Padding(0, 1)
+
+	badgeYouTube = lipgloss.NewStyle().
+		Foreground(lipgloss.Color("#FFFFFF")).
+		Background(lipgloss.Color("#f7768e")).
+		Bold(true).
+		Padding(0, 1)
+
+	badgeSpotify = lipgloss.NewStyle().
+		Foreground(lipgloss.Color("#1a1b26")).
+		Background(lipgloss.Color("#73daca")).
+		Bold(true).
+		Padding(0, 1)
+
+	badgeJioSaavn = lipgloss.NewStyle().
+		Foreground(lipgloss.Color("#1a1b26")).
+		Background(lipgloss.Color("#7dcfff")).
+		Bold(true).
+		Padding(0, 1)
+}
+
 func InitialModel(svc *cli.AppServices) Model {
 	tracks, _ := svc.Library.AllTracks()
+	thID := "tokyo-night"
+	if svc.Config != nil && svc.Config.Theme != "" {
+		thID = svc.Config.Theme
+	}
+	th := theme.GetTheme(thID)
+	applyTheme(th)
+
+	imgProto := metadata.ProtocolSixel
+	if svc.Config != nil && svc.Config.Image.Protocol != "" && svc.Config.Image.Protocol != "auto" {
+		imgProto = metadata.ImageProtocol(svc.Config.Image.Protocol)
+	}
+
 	m := Model{
 		svc:           svc,
 		currentView:   ViewHome,
+		currentTheme:  th,
 		cursor:        0,
 		width:         110,
 		height:        35,
 		libraryTracks: tracks,
-		statusMsg:     "Ready. Press [/] to search all sources or type /setting",
+		showThumbnail: true,
+		imageProtocol: imgProto,
+		statusMsg:     "Ready. Press [?] for shortcuts, [/] to search, [T] for themes",
 		statusTime:    time.Now(),
+		prevVolume:    80,
 	}
 	return m
 }
 
 func (m Model) Init() tea.Cmd {
-	return tickCmd()
+	return tea.Batch(tickCmd(), tea.EnableMouseCellMotion)
 }
 
 func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
@@ -180,6 +306,55 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.width = msg.Width
 		m.height = msg.Height
 		return m, nil
+
+	case tea.MouseMsg:
+		if msg.Button == tea.MouseButtonWheelUp {
+			if m.popup != PopupNone {
+				if m.popupCursor > 0 {
+					m.popupCursor--
+				}
+			} else if m.cursor > 0 {
+				m.cursor--
+			}
+			return m, nil
+		}
+		if msg.Button == tea.MouseButtonWheelDown {
+			if m.popup != PopupNone {
+				m.popupCursor++
+			} else if m.cursor < m.currentListLength()-1 {
+				m.cursor++
+			}
+			return m, nil
+		}
+		if msg.Button == tea.MouseButtonLeft && msg.Action == tea.MouseActionPress {
+			if m.popup != PopupNone {
+				return m, nil
+			}
+			if msg.Y >= 13 && msg.Y <= 15 && m.width > 0 {
+				_, durSec := m.svc.Audio.Progress()
+				if durSec > 0 {
+					ratio := float64(msg.X) / float64(m.width)
+					if ratio < 0 {
+						ratio = 0
+					}
+					if ratio > 1 {
+						ratio = 1
+					}
+					targetSec := ratio * durSec
+					pos, _ := m.svc.Audio.Progress()
+					m.svc.Audio.Seek(targetSec - pos)
+					m.setStatus(fmt.Sprintf("Seeked to %02d:%02d", int(targetSec)/60, int(targetSec)%60))
+				}
+				return m, nil
+			}
+			if msg.Y >= 19 && msg.Y < 19+m.height {
+				rowIdx := msg.Y - 19
+				if rowIdx >= 0 && rowIdx < m.currentListLength() {
+					m.cursor = rowIdx
+					return m, m.handleSelection()
+				}
+			}
+		}
 
 	case tickMsg:
 		m.animFrame = (m.animFrame + 1) % 100
@@ -198,6 +373,18 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.loadingLyricsTrack = cur.ID
 				cmds = append(cmds, loadLyricsCmd(cur))
 			}
+			if cur.ID != m.thumbnailTrackID {
+				m.thumbnailTrackID = cur.ID
+				if cached := metadata.GetCachedThumbnailProto(cur, 22, 11, m.imageProtocol); len(cached) > 0 {
+					m.thumbnailLines = cached
+				} else {
+					m.thumbnailLines = metadata.GenerateFallbackArtwork(22, 11, cur.Title, cur.Artist)
+					cmds = append(cmds, loadThumbnailCmd(cur, 22, 11, m.imageProtocol))
+				}
+			}
+		} else if m.thumbnailTrackID != "" {
+			m.thumbnailTrackID = ""
+			m.thumbnailLines = nil
 		}
 
 		if len(cmds) > 1 {
@@ -213,6 +400,12 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		return m, nil
 
+	case thumbnailLoadedMsg:
+		if msg.trackID == m.thumbnailTrackID && len(msg.lines) > 0 {
+			m.thumbnailLines = msg.lines
+		}
+		return m, nil
+
 	case unifiedSearchMsg:
 		m.isSearchingUnified = false
 		if msg.err != nil {
@@ -225,7 +418,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.updateUnifiedFilteredList()
 			m.cursor = 0
 			if len(msg.allTracks) > 0 {
-				m.setStatus(fmt.Sprintf("✓ Found %d results (%d Local, %d Online)! [Enter] Play, [Tab] Filter, [a] Queue",
+				m.setStatus(fmt.Sprintf("Found %d results (%d Local, %d Online)! [Enter] Play, [Tab] Filter, [a] Actions",
 					len(msg.allTracks), len(msg.localTracks), len(msg.onlineTracks)))
 			} else {
 				m.setStatus(fmt.Sprintf("No results found for '%s'", msg.query))
@@ -247,6 +440,15 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.loadingLyricsTrack = msg.track.ID
 				cmds = append(cmds, loadLyricsCmd(&msg.track))
 			}
+			if msg.track.ID != m.thumbnailTrackID {
+				m.thumbnailTrackID = msg.track.ID
+				if cached := metadata.GetCachedThumbnailProto(&msg.track, 22, 11, m.imageProtocol); len(cached) > 0 {
+					m.thumbnailLines = cached
+				} else {
+					m.thumbnailLines = metadata.GenerateFallbackArtwork(22, 11, msg.track.Title, msg.track.Artist)
+					cmds = append(cmds, loadThumbnailCmd(&msg.track, 22, 11, m.imageProtocol))
+				}
+			}
 			if len(cmds) > 0 {
 				return m, tea.Batch(cmds...)
 			}
@@ -262,12 +464,173 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 
 		key := msg.String()
+
+		if m.popup != PopupNone {
+			switch key {
+			case "ctrl+c":
+				graphics.GetCoverWindow().Close()
+				return m, tea.Quit
+			case "esc", "q":
+				m.popup = PopupNone
+				return m, nil
+			case "up", "k":
+				if m.popupCursor > 0 {
+					m.popupCursor--
+				}
+				return m, nil
+			case "down", "j":
+				m.popupCursor++
+				return m, nil
+			case "enter":
+				return m.handlePopupEnter()
+			}
+			return m, nil
+		}
+
+		now := time.Now()
+		if m.lastKey != "" && now.Sub(m.lastKeyEvent) < 1000*time.Millisecond {
+			prevKey := m.lastKey
+			m.lastKey = ""
+			switch prevKey {
+			case "g":
+				if key == "g" {
+					m.cursor = 0
+					return m, nil
+				} else if key == "a" {
+					m.openActionPopup(m.getSelectedTrack())
+					return m, nil
+				} else if key == "L" || key == "l" {
+					m.setStatus("Focused Live Synced Lyrics view")
+					return m, nil
+				}
+			case "s", "S":
+				switch key {
+				case "t":
+					if prevKey == "s" {
+						m.svc.Queue.ToggleShuffle()
+					}
+					m.sortCurrentTracks("title")
+					return m, nil
+				case "a":
+					if prevKey == "s" {
+						m.svc.Queue.ToggleShuffle()
+					}
+					m.sortCurrentTracks("artist")
+					return m, nil
+				case "d":
+					if prevKey == "s" {
+						m.svc.Queue.ToggleShuffle()
+					}
+					m.sortCurrentTracks("duration")
+					return m, nil
+				case "r":
+					if prevKey == "s" {
+						m.svc.Queue.ToggleShuffle()
+					}
+					m.sortCurrentTracks("reverse")
+					return m, nil
+				}
+			}
+		}
+
 		switch key {
 		case "ctrl+c":
 			graphics.GetCoverWindow().Close()
 			return m, tea.Quit
 
-		case "esc":
+		case "g":
+			m.lastKey = key
+			m.lastKeyEvent = time.Now()
+			return m, nil
+
+		case "w":
+			cur := m.svc.Audio.CurrentTrack()
+			if cur != nil {
+				artPath := metadata.GetTrackArtworkPathOrURL(cur)
+				_ = graphics.GetCoverWindow().UpdateCover(artPath, cur.Title, cur.Artist)
+			}
+			visible := graphics.GetCoverWindow().Toggle()
+			if visible {
+				m.setStatus("Cover Window: OPENED")
+			} else {
+				m.setStatus("Cover Window: CLOSED")
+			}
+			return m, nil
+
+		case "?", "ctrl+h":
+			m.popup = PopupHelp
+			m.popupCursor = 0
+			return m, nil
+
+		case "t", "T":
+			m.popup = PopupTheme
+			m.popupCursor = 0
+			return m, nil
+
+		case "o", "ctrl+@", "ctrl+space", "ctrl+ ":
+			m.openActionPopup(m.getSelectedTrack())
+			return m, nil
+
+		case "a":
+			cur := m.svc.Audio.CurrentTrack()
+			if cur != nil {
+				m.openActionPopup(cur)
+			} else {
+				m.openActionPopup(m.getSelectedTrack())
+			}
+			return m, nil
+
+		case "Z", "ctrl+z":
+			if t := m.getSelectedTrack(); t != nil {
+				m.svc.Queue.Add(*t)
+				m.setStatus(fmt.Sprintf("Added to queue: %s", t.Title))
+			}
+			return m, nil
+
+		case "z":
+			m.currentView = ViewQueue
+			m.cursor = 0
+			return m, nil
+
+		case "l":
+			m.setStatus("Focused Live Synced Lyrics view")
+			return m, nil
+
+		case "v", "V":
+			if !m.showThumbnail {
+				m.showThumbnail = true
+				m.imageProtocol = metadata.ProtocolHalfblocks
+			} else {
+				switch m.imageProtocol {
+				case metadata.ProtocolHalfblocks:
+					m.imageProtocol = metadata.ProtocolBraille
+				case metadata.ProtocolBraille:
+					m.imageProtocol = metadata.ProtocolSixel
+				case metadata.ProtocolSixel:
+					m.imageProtocol = metadata.ProtocolKitty
+				case metadata.ProtocolKitty:
+					m.imageProtocol = metadata.ProtocolITerm2
+				default:
+					m.showThumbnail = false
+				}
+			}
+
+			if !m.showThumbnail {
+				m.setStatus("Album Cover Thumbnail: HIDDEN")
+				return m, nil
+			}
+
+			cur := m.svc.Audio.CurrentTrack()
+			if cur != nil {
+				m.thumbnailLines = metadata.GetTrackCoverThumbnailProto(cur, 22, 11, m.imageProtocol)
+			}
+			m.setStatus(fmt.Sprintf("Image Mode: %s", metadata.ProtocolDisplayName(m.imageProtocol)))
+			if cur != nil {
+				return m, loadThumbnailCmd(cur, 22, 11, m.imageProtocol)
+			}
+			return m, nil
+
+		case "q", "esc":
 			if m.unifiedQuery != "" {
 				m.unifiedQuery = ""
 				m.unifiedAll = nil
@@ -282,6 +645,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.cursor = 0
 				return m, nil
 			}
+			graphics.GetCoverWindow().Close()
 			return m, tea.Quit
 
 		case "tab":
@@ -332,49 +696,97 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.currentView = ViewSettings
 			m.cursor = 0
 
-		case " ":
+		case " ", "space":
 			m.svc.Audio.TogglePlayPause()
-		case "n", ">":
+		case "n":
 			if next := m.svc.Queue.Next(); next != nil {
 				_ = m.svc.Audio.Play(next)
 				_ = m.svc.History.Record(*next, 0)
 			}
-		case "p", "<":
+		case "p":
 			if prev := m.svc.Queue.Previous(); prev != nil {
 				_ = m.svc.Audio.Play(prev)
 			}
+
+		case ".":
+			m.playRandomTrack()
+			return m, nil
+
+		case "_":
+			vol := m.svc.Audio.Volume()
+			if vol > 0 {
+				m.prevVolume = vol
+				m.svc.Audio.SetVolume(0)
+				m.setStatus("🔇 Muted (press _ to unmute)")
+			} else {
+				target := m.prevVolume
+				if target <= 0 {
+					target = 80
+				}
+				m.svc.Audio.SetVolume(target)
+				m.setStatus(fmt.Sprintf("🔊 Unmuted: %d%%", target))
+			}
+
+		case "^":
+			pos, _ := m.svc.Audio.Progress()
+			m.svc.Audio.Seek(-pos)
+			m.setStatus("Seeked to start (00:00)")
+
 		case "+", "=":
 			v := m.svc.Audio.AdjustVolume(5)
 			m.setStatus(fmt.Sprintf("Volume: %d%%", v))
 		case "-":
 			v := m.svc.Audio.AdjustVolume(-5)
 			m.setStatus(fmt.Sprintf("Volume: %d%%", v))
-		case "right":
+		case "right", ">":
 			m.svc.Audio.Seek(10)
-		case "left":
+		case "left", "<":
 			m.svc.Audio.Seek(-10)
 
-		case "up", "k":
+		case "[":
+			m.lyricOffset -= 250 * time.Millisecond
+			m.setStatus(fmt.Sprintf("Lyric Sync Offset: %v", m.lyricOffset))
+		case "]":
+			m.lyricOffset += 250 * time.Millisecond
+			m.setStatus(fmt.Sprintf("Lyric Sync Offset: %v", m.lyricOffset))
+
+		case "up", "k", "ctrl+p":
 			if m.cursor > 0 {
 				m.cursor--
 			}
-		case "down", "j":
+		case "down", "j", "ctrl+n":
 			maxLen := m.currentListLength()
 			if m.cursor < maxLen-1 {
 				m.cursor++
+			}
+		case "G", "end":
+			maxLen := m.currentListLength()
+			if maxLen > 0 {
+				m.cursor = maxLen - 1
+			}
+		case "home":
+			m.cursor = 0
+		case "ctrl+f", "pgdown":
+			m.cursor += 10
+			maxLen := m.currentListLength()
+			if m.cursor >= maxLen && maxLen > 0 {
+				m.cursor = maxLen - 1
+			}
+		case "ctrl+b", "pgup":
+			m.cursor -= 10
+			if m.cursor < 0 {
+				m.cursor = 0
 			}
 
 		case "enter":
 			return m, m.handleSelection()
 
-		case "a":
-			if t := m.getSelectedTrack(); t != nil {
-				m.svc.Queue.Add(*t)
-				m.setStatus(fmt.Sprintf("Added to queue: %s", t.Title))
-			}
-
 		case "f":
-			if t := m.getSelectedTrack(); t != nil {
+			t := m.getSelectedTrack()
+			if t == nil {
+				t = m.svc.Audio.CurrentTrack()
+			}
+			if t != nil {
 				if m.svc.DB.IsFavorite(t.ID) {
 					_ = m.svc.DB.RemoveFavorite(t.ID)
 					m.setStatus(fmt.Sprintf("Removed from favorites: %s", t.Title))
@@ -382,49 +794,241 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					_ = m.svc.DB.AddFavorite(t)
 					m.setStatus(fmt.Sprintf("Added to favorites: %s", t.Title))
 				}
+			} else {
+				m.setStatus("No track selected or playing to favorite.")
 			}
 
 		case "N":
 			m.handleSaveToNAS()
 
-		case "/", "s", ":":
+		case "/", ":":
 			m.searching = true
 			m.searchBuffer = ""
 
-		case "S":
+		case "s", "ctrl+s":
 			shuf := m.svc.Queue.ToggleShuffle()
 			if shuf {
 				m.setStatus("Shuffle: ON")
 			} else {
 				m.setStatus("Shuffle: OFF")
 			}
-		case "r":
+			m.lastKey = "s"
+			m.lastKeyEvent = time.Now()
+			return m, nil
+
+		case "S":
+			m.sortCurrentTracks("title")
+			m.lastKey = "S"
+			m.lastKeyEvent = time.Now()
+			return m, nil
+
+		case "r", "ctrl+r":
 			mode := m.svc.Queue.CycleRepeat()
 			m.setStatus(fmt.Sprintf("Repeat: %s", mode))
 
-		case "w", "W":
-			vis := graphics.GetCoverWindow().Toggle()
-			if vis {
-				m.setStatus("🖼️ Desktop Cover Window: SHOWN (Real Image)")
-				track := m.getSelectedTrack()
-				if track == nil {
-					track = m.svc.Audio.CurrentTrack()
+		case "d", "x":
+			if m.currentView == ViewQueue && m.svc.Queue.Len() > 0 {
+				m.svc.Queue.Remove(m.cursor)
+				if m.cursor >= m.svc.Queue.Len() && m.cursor > 0 {
+					m.cursor--
 				}
-				if track != nil {
-					artPath := metadata.GetTrackArtworkPathOrURL(track)
-					_ = graphics.GetCoverWindow().UpdateCover(artPath, track.Title, track.Artist)
-				}
-			} else {
-				m.setStatus("🖼️ Desktop Cover Window: HIDDEN")
+				m.setStatus("Removed track from queue")
 			}
-			return m, nil
-
-		case "?":
-			m.setStatus("Hotkeys: [/] Search, [Space] Pause, [Enter] Play, [1-9] Tabs")
+		case "K", "ctrl+k":
+			if m.currentView == ViewQueue && m.cursor > 0 {
+				m.svc.Queue.Move(m.cursor, m.cursor-1)
+				m.cursor--
+			}
+		case "J", "ctrl+j":
+			if m.currentView == ViewQueue && m.cursor < m.svc.Queue.Len()-1 {
+				m.svc.Queue.Move(m.cursor, m.cursor+1)
+				m.cursor++
+			}
+		case "C":
+			if m.currentView == ViewQueue {
+				m.svc.Queue.Clear()
+				m.cursor = 0
+				m.setStatus("Queue cleared")
+			}
 		}
 	}
 
 	return m, nil
+}
+
+func (m *Model) openActionPopup(t *core.Track) {
+	if t == nil {
+		m.setStatus("No track selected for actions.")
+		return
+	}
+	m.popup = PopupActions
+	m.popupActionTrack = t
+	m.popupCursor = 0
+}
+
+func (m *Model) playRandomTrack() {
+	tracks := m.currentTrackList()
+	if len(tracks) == 0 {
+		m.setStatus("No tracks available to shuffle.")
+		return
+	}
+	idx := rand.Intn(len(tracks))
+	m.cursor = idx
+	t := tracks[idx]
+	_ = m.svc.Audio.Play(&t)
+	_ = m.svc.History.Record(t, 0)
+	m.setStatus(fmt.Sprintf("🔀 Shuffled to: %s - %s", t.Artist, t.Title))
+}
+
+func (m *Model) currentTrackList() []core.Track {
+	if m.unifiedQuery != "" && len(m.unifiedTracks) > 0 {
+		return m.unifiedTracks
+	}
+	switch m.currentView {
+	case ViewLibrary:
+		return m.libraryTracks
+	case ViewOnline:
+		return m.onlineTracks
+	case ViewNAS:
+		return m.nasTracks
+	case ViewFavorites:
+		favs, _ := m.svc.DB.GetFavorites()
+		return favs
+	default:
+		return m.libraryTracks
+	}
+}
+
+func (m *Model) sortCurrentTracks(by string) {
+	tracks := m.currentTrackList()
+	if len(tracks) == 0 {
+		return
+	}
+	switch by {
+	case "title":
+		sort.Slice(tracks, func(i, j int) bool {
+			return strings.ToLower(tracks[i].Title) < strings.ToLower(tracks[j].Title)
+		})
+		m.setStatus("Sorted by Title (A-Z)")
+	case "artist":
+		sort.Slice(tracks, func(i, j int) bool {
+			return strings.ToLower(tracks[i].Artist) < strings.ToLower(tracks[j].Artist)
+		})
+		m.setStatus("Sorted by Artist (A-Z)")
+	case "duration":
+		sort.Slice(tracks, func(i, j int) bool {
+			return tracks[i].Duration < tracks[j].Duration
+		})
+		m.setStatus("Sorted by Duration")
+	case "reverse":
+		for i, j := 0, len(tracks)-1; i < j; i, j = i+1, j-1 {
+			tracks[i], tracks[j] = tracks[j], tracks[i]
+		}
+		m.setStatus("Reversed list order")
+	}
+
+	if m.unifiedQuery != "" {
+		m.unifiedTracks = tracks
+	} else {
+		switch m.currentView {
+		case ViewLibrary:
+			m.libraryTracks = tracks
+		case ViewOnline:
+			m.onlineTracks = tracks
+		case ViewNAS:
+			m.nasTracks = tracks
+		}
+	}
+	m.cursor = 0
+}
+
+func (m *Model) handlePopupEnter() (tea.Model, tea.Cmd) {
+	switch m.popup {
+	case PopupTheme:
+		if m.popupCursor >= 0 && m.popupCursor < len(theme.Presets) {
+			sel := theme.Presets[m.popupCursor]
+			m.currentTheme = sel
+			applyTheme(sel)
+			if m.svc.Config != nil {
+				m.svc.Config.Theme = sel.ID
+				_ = config.Save(m.svc.Config)
+			}
+			m.setStatus(fmt.Sprintf("Switched theme to: %s", sel.Name))
+		}
+		m.popup = PopupNone
+		return m, nil
+
+	case PopupActions:
+		if m.popupActionTrack == nil {
+			m.popup = PopupNone
+			return m, nil
+		}
+		track := *m.popupActionTrack
+		actionIdx := m.popupCursor
+		m.popup = PopupNone
+
+		switch actionIdx {
+		case 0:
+			m.setStatus(fmt.Sprintf("▶ Playing: %s", track.Title))
+			return m, func() tea.Msg {
+				_ = m.svc.Audio.Play(&track)
+				_ = m.svc.History.Record(track, 0)
+				return streamResolvedMsg{track: track}
+			}
+		case 1:
+			m.svc.Queue.Add(track)
+			m.setStatus(fmt.Sprintf("Added to queue: %s", track.Title))
+		case 2:
+			if m.svc.DB.IsFavorite(track.ID) {
+				_ = m.svc.DB.RemoveFavorite(track.ID)
+				m.setStatus(fmt.Sprintf("Removed from favorites: %s", track.Title))
+			} else {
+				_ = m.svc.DB.AddFavorite(&track)
+				m.setStatus(fmt.Sprintf("Added to favorites: %s", track.Title))
+			}
+		case 3:
+			m.popup = PopupPlaylistSelect
+			m.popupCursor = 0
+			return m, nil
+		case 4:
+			servers, _ := m.svc.DB.GetServers()
+			if len(servers) > 0 {
+				go func(s core.ServerConfig, t core.Track) {
+					_, _ = m.svc.Remote.SaveToNAS(&s, &t)
+				}(servers[0], track)
+				m.setStatus(fmt.Sprintf("Sent save request to NAS: %s", track.Title))
+			} else {
+				m.setStatus("⚠️ No NAS configured. Add one under Settings.")
+			}
+		case 5:
+			m.unifiedQuery = track.Artist
+			m.isSearchingUnified = true
+			m.searchFilter = 0
+			m.setStatus(fmt.Sprintf("Searching artist: %s", track.Artist))
+			return m, unifiedSearchCmd(m.svc, track.Artist)
+		case 6:
+			url := track.StreamURL
+			if url == "" {
+				url = track.LocalPath
+			}
+			m.setStatus(fmt.Sprintf("Track Link: %s", truncate(url, 40)))
+		}
+		return m, nil
+
+	case PopupPlaylistSelect:
+		lists := m.svc.Playlists.List()
+		if m.popupCursor >= 0 && m.popupCursor < len(lists) && m.popupActionTrack != nil {
+			targetList := lists[m.popupCursor]
+			_ = m.svc.Playlists.AddTrack(targetList.ID, *m.popupActionTrack)
+			m.setStatus(fmt.Sprintf("Added '%s' to playlist '%s'", m.popupActionTrack.Title, targetList.Name))
+		}
+		m.popup = PopupNone
+		return m, nil
+
+	default:
+		m.popup = PopupNone
+		return m, nil
+	}
 }
 
 func (m *Model) setStatus(msg string) {
@@ -500,6 +1104,9 @@ func (m *Model) currentListLength() int {
 	case ViewPlaylists:
 		lists, _ := m.svc.DB.GetPlaylists()
 		return len(lists)
+	case ViewSettings:
+		servers, _ := m.svc.DB.GetServers()
+		return 1 + len(servers)
 	default:
 		if len(m.unifiedTracks) > 0 {
 			return len(m.unifiedTracks)
@@ -537,6 +1144,12 @@ func (m *Model) getSelectedTrack() *core.Track {
 		if m.cursor >= 0 && m.cursor < len(favs) {
 			return &favs[m.cursor]
 		}
+	case ViewQueue:
+		items := m.svc.Queue.Items()
+		if m.cursor >= 0 && m.cursor < len(items) {
+			t := items[m.cursor].Track
+			return &t
+		}
 	default:
 		if len(m.unifiedTracks) > 0 && m.cursor >= 0 && m.cursor < len(m.unifiedTracks) {
 			return &m.unifiedTracks[m.cursor]
@@ -559,6 +1172,30 @@ func (m *Model) handleSelection() tea.Cmd {
 		m.newServerPass = ""
 		m.searchBuffer = ""
 		return nil
+	}
+
+	if m.currentView == ViewPlaylists {
+		lists, _ := m.svc.DB.GetPlaylists()
+		if m.cursor >= 0 && m.cursor < len(lists) {
+			pl := lists[m.cursor]
+			if len(pl.Tracks) > 0 {
+				m.svc.Queue.Clear()
+				for _, tr := range pl.Tracks {
+					m.svc.Queue.Add(tr)
+				}
+				first := pl.Tracks[0]
+				m.setStatus(fmt.Sprintf("Playing playlist '%s' (%d tracks)", pl.Name, len(pl.Tracks)))
+				_ = m.svc.Audio.Play(&first)
+				_ = m.svc.History.Record(first, 0)
+			} else {
+				m.setStatus(fmt.Sprintf("Playlist '%s' is empty", pl.Name))
+			}
+		}
+		return nil
+	}
+
+	if m.currentView == ViewQueue {
+		m.svc.Queue.JumpTo(m.cursor)
 	}
 
 	t := m.getSelectedTrack()
@@ -614,10 +1251,10 @@ func (m *Model) handleSaveToNAS() {
 	go func(s core.ServerConfig, t core.Track) {
 		job, err := m.svc.Remote.SaveToNAS(&s, &t)
 		if err != nil {
-			m.setStatus(fmt.Sprintf("✗ Save to NAS failed: %v", err))
+			m.setStatus(fmt.Sprintf("Save to NAS failed: %v", err))
 			return
 		}
-		m.setStatus(fmt.Sprintf("✓ Remote Job Queued on %s! NAS is acquiring '%s'", s.Name, t.Title))
+		m.setStatus(fmt.Sprintf("Remote Job Queued on %s! NAS is acquiring '%s'", s.Name, t.Title))
 		_ = job
 	}(srv, *target)
 }
@@ -686,8 +1323,14 @@ func (m Model) handleSearchInput(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			m.cursor = 0
 			m.searchBuffer = ""
 			return m, nil
+		case "theme", "themes":
+			m.popup = PopupTheme
+			m.popupCursor = 0
+			m.searchBuffer = ""
+			return m, nil
 		case "help":
-			m.setStatus("Commands: /setting, /library, /online, /nas, /queue, /playlists, /favorites")
+			m.popup = PopupHelp
+			m.popupCursor = 0
 			m.searchBuffer = ""
 			return m, nil
 		case "quit", "exit":
@@ -772,11 +1415,11 @@ func (m Model) handleServerInput(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 				m.setStatus(fmt.Sprintf("Testing live connection to %s (%s)...", s.Name, s.BaseURL()))
 				test := m.svc.Remote.TestConnection(&s)
 				if !test.Reachable {
-					m.setStatus(fmt.Sprintf("✗ Server %s unreachable: %s", s.Name, test.ErrorMessage))
+					m.setStatus(fmt.Sprintf("Server %s unreachable: %s", s.Name, test.ErrorMessage))
 					return
 				}
 				_ = m.svc.DB.SaveServer(&s)
-				m.setStatus(fmt.Sprintf("✓ Server '%s' connected & verified! NAS menu is now unlocked.", s.Name))
+				m.setStatus(fmt.Sprintf("Server '%s' connected & verified! NAS menu is now unlocked.", s.Name))
 			}(srv)
 		}
 	case "backspace":
@@ -790,61 +1433,6 @@ func (m Model) handleServerInput(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	}
 	return m, nil
 }
-
-var (
-	headerStyle = lipgloss.NewStyle().
-			Foreground(lipgloss.Color("#EEEEEE")).
-			Bold(true)
-
-	navActiveStyle = lipgloss.NewStyle().
-			Bold(true).
-			Foreground(lipgloss.Color("#FFFFFF")).
-			Background(lipgloss.Color("#3b4261"))
-
-	navInactiveStyle = lipgloss.NewStyle().
-				Foreground(lipgloss.Color("#7aa2f7"))
-
-	selectedRowStyle = lipgloss.NewStyle().
-				Bold(true).
-				Foreground(lipgloss.Color("#FFFFFF")).
-				Background(lipgloss.Color("#283457"))
-
-	normalRowStyle = lipgloss.NewStyle().
-			Foreground(lipgloss.Color("#c0caf5"))
-
-	dimStyle = lipgloss.NewStyle().
-			Foreground(lipgloss.Color("#565f89"))
-
-	cyanStyle = lipgloss.NewStyle().
-			Foreground(lipgloss.Color("#7dcfff"))
-
-	boxBorder = lipgloss.NewStyle().
-			Foreground(lipgloss.Color("#3b4261"))
-
-	badgeLocal = lipgloss.NewStyle().
-			Foreground(lipgloss.Color("#1a1b26")).
-			Background(lipgloss.Color("#9ece6a")).
-			Bold(true).
-			Padding(0, 1)
-
-	badgeYouTube = lipgloss.NewStyle().
-			Foreground(lipgloss.Color("#FFFFFF")).
-			Background(lipgloss.Color("#f7768e")).
-			Bold(true).
-			Padding(0, 1)
-
-	badgeSpotify = lipgloss.NewStyle().
-			Foreground(lipgloss.Color("#1a1b26")).
-			Background(lipgloss.Color("#73daca")).
-			Bold(true).
-			Padding(0, 1)
-
-	badgeJioSaavn = lipgloss.NewStyle().
-			Foreground(lipgloss.Color("#1a1b26")).
-			Background(lipgloss.Color("#7dcfff")).
-			Bold(true).
-			Padding(0, 1)
-)
 
 func renderBoxTop(title string, boxWidth int) string {
 	innerWidth := boxWidth - 2
@@ -867,7 +1455,7 @@ func renderBoxTop(title string, boxWidth int) string {
 		dashes = 0
 	}
 
-	return boxBorder.Render("┌─") + lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("#c0caf5")).Render(titleText) + boxBorder.Render(strings.Repeat("─", dashes)+"┐")
+	return boxBorder.Render("┌─") + lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color(currentThemeTheme.Fg)).Render(titleText) + boxBorder.Render(strings.Repeat("─", dashes)+"┐")
 }
 
 func renderBoxBottom(boxWidth int) string {
@@ -961,20 +1549,203 @@ func (m Model) View() string {
 	b.WriteString(boxBorder.Render(strings.Repeat("─", width)) + "\n")
 
 	b.WriteString(m.renderTopHeroSection(width) + "\n")
-
 	b.WriteString(m.renderProgressBarBox(width) + "\n")
-
 	b.WriteString(m.renderSearchCommandBar(width) + "\n")
-
 	b.WriteString(m.renderBottomSplitView(width))
 
 	status := m.statusMsg
 	if time.Since(m.statusTime) > 6*time.Second {
-		status = "Hotkeys: [/] Search │ [Space] Pause │ [Enter] Play │ [1-9] Tabs"
+		status = "Hotkeys: [?] Help │ [o] Actions │ [/] Search │ [T] Theme │ [Space] Pause │ [Enter] Play"
 	}
-	b.WriteString("\n" + cyanStyle.Bold(true).Render("STATUS: ") + lipgloss.NewStyle().Foreground(lipgloss.Color("#e0af68")).Render(status))
+	b.WriteString("\n" + cyanStyle.Bold(true).Render("STATUS: ") + lipgloss.NewStyle().Foreground(lipgloss.Color(currentThemeTheme.Secondary)).Render(status))
 
-	return b.String()
+	baseView := b.String()
+	if m.popup != PopupNone {
+		return m.renderPopupOverlay(baseView, width, m.height)
+	}
+	return baseView
+}
+
+func (m Model) renderPopupOverlay(baseView string, totalWidth, totalHeight int) string {
+	boxWidth := 56
+	if totalWidth < 62 {
+		boxWidth = totalWidth - 4
+	}
+
+	var popContent string
+	switch m.popup {
+	case PopupTheme:
+		popContent = m.renderThemePopup(boxWidth)
+	case PopupActions:
+		popContent = m.renderActionsPopup(boxWidth)
+	case PopupHelp:
+		popContent = m.renderHelpPopup(boxWidth + 6)
+		boxWidth += 6
+	case PopupPlaylistSelect:
+		popContent = m.renderPlaylistSelectPopup(boxWidth)
+	default:
+		return baseView
+	}
+
+	baseLines := strings.Split(baseView, "\n")
+	popLines := strings.Split(popContent, "\n")
+
+	startY := (totalHeight - len(popLines)) / 2
+	if startY < 2 {
+		startY = 2
+	}
+
+	out := make([]string, len(baseLines))
+	copy(out, baseLines)
+
+	leftPad := (totalWidth - boxWidth) / 2
+	if leftPad < 0 {
+		leftPad = 0
+	}
+
+	for idx, pLine := range popLines {
+		targetY := startY + idx
+		if targetY >= 0 && targetY < len(out) {
+			out[targetY] = strings.Repeat(" ", leftPad) + pLine
+		}
+	}
+
+	return strings.Join(out, "\n")
+}
+
+func (m Model) renderThemePopup(boxWidth int) string {
+	var lines []string
+	title := "SWITCH THEME"
+	lines = append(lines, renderBoxTop(title, boxWidth))
+
+	for idx, th := range theme.Presets {
+		cursor := "  "
+		style := normalRowStyle
+		if idx == m.popupCursor%len(theme.Presets) {
+			cursor = "▶ "
+			style = selectedRowStyle
+		}
+		activeTag := ""
+		if th.ID == m.currentTheme.ID {
+			activeTag = " [ACTIVE]"
+		}
+		line := fmt.Sprintf("%s%s%s", cursor, th.Name, activeTag)
+		lines = append(lines, renderBoxLine(style.Render(line), boxWidth))
+	}
+
+	lines = append(lines, renderBoxLine("", boxWidth))
+	hint := " [Enter] Select │ [Esc] Cancel │ [j/k] Move "
+	lines = append(lines, renderBoxLine(dimStyle.Render(hint), boxWidth))
+	lines = append(lines, renderBoxBottom(boxWidth))
+	return strings.Join(lines, "\n")
+}
+
+func (m Model) renderActionsPopup(boxWidth int) string {
+	var lines []string
+	titleText := "⚡ ACTIONS"
+	if m.popupActionTrack != nil {
+		titleText = fmt.Sprintf("⚡ ACTIONS: %s", truncate(m.popupActionTrack.Title, 22))
+	}
+	lines = append(lines, renderBoxTop(titleText, boxWidth))
+
+	options := []string{
+		"▶ Play Now",
+		"+ Add to Queue",
+		"★ Toggle Favorite",
+		"≡ Add to Playlist...",
+		"☁ Save to NAS Cloud",
+		"🔍 Filter / Browse Artist",
+		"📋 Copy Link / Path",
+	}
+
+	for idx, opt := range options {
+		cursor := "  "
+		style := normalRowStyle
+		if idx == m.popupCursor%len(options) {
+			cursor = "▶ "
+			style = selectedRowStyle
+		}
+		line := fmt.Sprintf("%s%s", cursor, opt)
+		lines = append(lines, renderBoxLine(style.Render(line), boxWidth))
+	}
+
+	lines = append(lines, renderBoxLine("", boxWidth))
+	hint := " [Enter] Execute │ [Esc] Cancel "
+	lines = append(lines, renderBoxLine(dimStyle.Render(hint), boxWidth))
+	lines = append(lines, renderBoxBottom(boxWidth))
+	return strings.Join(lines, "\n")
+}
+
+func (m Model) renderHelpPopup(boxWidth int) string {
+	var lines []string
+	title := "⌨ KEYBOARD SHORTCUTS (spotify-player parity)"
+	lines = append(lines, renderBoxTop(title, boxWidth))
+
+	shortcuts := []string{
+		"[Space]          Play / Pause",
+		"[n] / [p]        Next / Previous track",
+		"[s]              Toggle shuffle",
+		"[r]              Cycle repeat mode",
+		"[f]              Toggle favorite",
+		"[.]              Play random track (shuffle jump)",
+		"[_]              Mute / Unmute audio",
+		"[^]              Seek to start (00:00)",
+		"[>] / [<]        Seek forward / backward 10s",
+		"[+] / [-]        Volume up / down (5%)",
+		"[ [ ] / [ ] ]    Adjust lyric sync delay (±250ms)",
+		"[j/k], [↑/↓]     Navigate track lists",
+		"[g g] / [Home]   Jump to top",
+		"[G] / [End]      Jump to bottom",
+		"[C-f] / [C-b]    Page down / Page up",
+		"[o] / [g a]      Actions popup on selected track",
+		"[a]              Actions popup on current track",
+		"[t] / [T]        Open theme switcher popup",
+		"[1-9]            Switch view tabs (1..9)",
+		"[z]              Jump to Queue tab",
+		"[Z] / [C-z]      Add selected track to queue",
+		"[d] / [C]        (In Queue) Delete item / Clear queue",
+		"[K] / [J]        (In Queue) Move item up / down",
+		"[S] / [s t/a/d]  Sort by Title, Artist, Duration, Reverse",
+		"[v]              Cycle image mode (Halfblock/Braille/Sixel/Off)",
+		"[w]              Open full-resolution cover window",
+		"[/]              Unified search across all sources",
+		"[q] / [Esc]      Back / Close popup / Clear search / Quit",
+	}
+
+	for _, s := range shortcuts {
+		lines = append(lines, renderBoxLine(" "+s, boxWidth))
+	}
+
+	lines = append(lines, renderBoxLine("", boxWidth))
+	lines = append(lines, renderBoxLine(dimStyle.Render(" Press [Esc] or [q] to close "), boxWidth))
+	lines = append(lines, renderBoxBottom(boxWidth))
+	return strings.Join(lines, "\n")
+}
+
+func (m Model) renderPlaylistSelectPopup(boxWidth int) string {
+	var lines []string
+	lines = append(lines, renderBoxTop("📁 ADD TO PLAYLIST", boxWidth))
+
+	lists, _ := m.svc.DB.GetPlaylists()
+	if len(lists) == 0 {
+		lines = append(lines, renderBoxLine(" No playlists found. Create one in Playlists tab.", boxWidth))
+	} else {
+		for idx, l := range lists {
+			cursor := "  "
+			style := normalRowStyle
+			if idx == m.popupCursor%len(lists) {
+				cursor = "▶ "
+				style = selectedRowStyle
+			}
+			line := fmt.Sprintf("%s%s (%d tracks)", cursor, l.Name, len(l.Tracks))
+			lines = append(lines, renderBoxLine(style.Render(line), boxWidth))
+		}
+	}
+
+	lines = append(lines, renderBoxLine("", boxWidth))
+	lines = append(lines, renderBoxLine(dimStyle.Render(" [Enter] Add │ [Esc] Cancel "), boxWidth))
+	lines = append(lines, renderBoxBottom(boxWidth))
+	return strings.Join(lines, "\n")
 }
 
 func (m Model) renderNavTab(label string, view ViewMode) string {
@@ -989,25 +1760,49 @@ func (m Model) renderTopHeroSection(totalWidth int) string {
 	state := m.svc.Audio.State()
 	isPlaying := (state == core.StatePlaying)
 
-	col1Width := 36
-	if totalWidth < 75 {
+	col1Width := 34
+	if totalWidth < 80 {
 		col1Width = 30
 	}
 
-	col2Width := totalWidth - col1Width - 3
-	showLyrics := col2Width >= 16
-
 	metaLines := m.renderMetadataCol(cur, isPlaying)
-
 	posSec, _ := m.svc.Audio.Progress()
 	lyricLines := m.renderLyricsCol(cur, posSec)
+
+	showThumbMiddle := m.showThumbnail && totalWidth >= 80
+	thumbWidth := 22
+	thumbHeight := 11
+
+	var thumbLines []string
+	if showThumbMiddle {
+		if cur != nil {
+			if len(m.thumbnailLines) == thumbHeight {
+				thumbLines = m.thumbnailLines
+			} else if cached := metadata.GetCachedThumbnailProto(cur, thumbWidth, thumbHeight, m.imageProtocol); len(cached) == thumbHeight {
+				thumbLines = cached
+			} else {
+				thumbLines = metadata.GenerateFallbackArtwork(thumbWidth, thumbHeight, cur.Title, cur.Artist)
+			}
+		} else {
+			thumbLines = metadata.GenerateFallbackArtwork(thumbWidth, thumbHeight, "Rhythm", "")
+		}
+	}
+
+	colLyricsWidth := totalWidth - col1Width - 3
+	if showThumbMiddle {
+		colLyricsWidth = totalWidth - col1Width - thumbWidth - 6
+	}
+	showLyrics := colLyricsWidth >= 16
 
 	maxLines := len(metaLines)
 	if showLyrics && len(lyricLines) > maxLines {
 		maxLines = len(lyricLines)
 	}
+	if showThumbMiddle && len(thumbLines) > maxLines {
+		maxLines = len(thumbLines)
+	}
 
-	colDivider := lipgloss.NewStyle().Foreground(lipgloss.Color("#6366f1")).Render(" │ ")
+	colDivider := lipgloss.NewStyle().Foreground(lipgloss.Color(currentThemeTheme.Secondary)).Render(" │ ")
 
 	var sb strings.Builder
 	for i := 0; i < maxLines; i++ {
@@ -1024,24 +1819,58 @@ func (m Model) renderTopHeroSection(totalWidth int) string {
 			pad1 = 0
 		}
 
-		if showLyrics {
-			l2 := ""
-			if i < len(lyricLines) {
-				l2 = lyricLines[i]
+		if showThumbMiddle {
+			lt := ""
+			if i < len(thumbLines) {
+				lt = thumbLines[i]
 			}
-			if lipgloss.Width(l2) > col2Width {
-				l2 = lipgloss.NewStyle().MaxWidth(col2Width).Render(l2)
-			}
-			w2 := lipgloss.Width(l2)
-			pad2 := col2Width - w2
-			if pad2 < 0 {
-				pad2 = 0
+			wt := lipgloss.Width(lt)
+			padT := thumbWidth - wt
+			if padT < 0 {
+				padT = 0
 			}
 
-			sb.WriteString(l1 + strings.Repeat(" ", pad1) + colDivider +
-				l2 + strings.Repeat(" ", pad2) + "\n")
+			if showLyrics {
+				l2 := ""
+				if i < len(lyricLines) {
+					l2 = lyricLines[i]
+				}
+				if lipgloss.Width(l2) > colLyricsWidth {
+					l2 = lipgloss.NewStyle().MaxWidth(colLyricsWidth).Render(l2)
+				}
+				w2 := lipgloss.Width(l2)
+				pad2 := colLyricsWidth - w2
+				if pad2 < 0 {
+					pad2 = 0
+				}
+
+				sb.WriteString(l1 + strings.Repeat(" ", pad1) + colDivider +
+					lt + strings.Repeat(" ", padT) + colDivider +
+					l2 + strings.Repeat(" ", pad2) + "\n")
+			} else {
+				sb.WriteString(l1 + strings.Repeat(" ", pad1) + colDivider +
+					lt + strings.Repeat(" ", padT) + "\n")
+			}
 		} else {
-			sb.WriteString(l1 + strings.Repeat(" ", pad1) + "\n")
+			if showLyrics {
+				l2 := ""
+				if i < len(lyricLines) {
+					l2 = lyricLines[i]
+				}
+				if lipgloss.Width(l2) > colLyricsWidth {
+					l2 = lipgloss.NewStyle().MaxWidth(colLyricsWidth).Render(l2)
+				}
+				w2 := lipgloss.Width(l2)
+				pad2 := colLyricsWidth - w2
+				if pad2 < 0 {
+					pad2 = 0
+				}
+
+				sb.WriteString(l1 + strings.Repeat(" ", pad1) + colDivider +
+					l2 + strings.Repeat(" ", pad2) + "\n")
+			} else {
+				sb.WriteString(l1 + strings.Repeat(" ", pad1) + "\n")
+			}
 		}
 	}
 
@@ -1090,16 +1919,16 @@ func (m Model) renderMetadataCol(cur *core.Track, isPlaying bool) []string {
 
 	spec := m.generateSpectrum(isPlaying)
 
-	kStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("#7aa2f7")).Bold(true)
-	cStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("#565f89"))
+	kStyle := lipgloss.NewStyle().Foreground(lipgloss.Color(currentThemeTheme.Accent)).Bold(true)
+	cStyle := lipgloss.NewStyle().Foreground(lipgloss.Color(currentThemeTheme.Subtext))
 
 	row := func(label string, valStyled string) string {
 		return kStyle.Render(label) + cStyle.Render(" : ") + valStyled
 	}
 
-	valStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("#e2e8f0"))
+	valStyle := lipgloss.NewStyle().Foreground(lipgloss.Color(currentThemeTheme.Fg))
 
-	titleVal := lipgloss.NewStyle().Foreground(lipgloss.Color("#e2e8f0")).Bold(true).Render(truncate(title, 22))
+	titleVal := lipgloss.NewStyle().Foreground(lipgloss.Color(currentThemeTheme.Fg)).Bold(true).Render(truncate(title, 22))
 	artistVal := valStyle.Render(truncate(artist, 22))
 	yearVal := valStyle.Render(year)
 	sampVal := valStyle.Render("44100KHz")
@@ -1140,11 +1969,11 @@ func (m Model) generateSpectrum(isPlaying bool) string {
 		}
 		var barColor string
 		if idx < 3 {
-			barColor = "#38bdf8"
+			barColor = currentThemeTheme.Accent
 		} else if idx < 6 {
-			barColor = "#818cf8"
+			barColor = currentThemeTheme.Secondary
 		} else {
-			barColor = "#f43f5e"
+			barColor = currentThemeTheme.Playing
 		}
 		sb.WriteString(lipgloss.NewStyle().Foreground(lipgloss.Color(barColor)).Render(string(bars[idx])))
 	}
@@ -1161,7 +1990,7 @@ func (m Model) renderLyricsCol(cur *core.Track, posSec float64) []string {
 		}
 	}
 
-	posDuration := time.Duration(posSec * float64(time.Second))
+	posDuration := time.Duration(posSec*float64(time.Second)) + m.lyricOffset
 
 	lyricsObj := m.currentLyrics
 	if lyricsObj == nil || (lyricsObj.TrackID != cur.ID && lyricsObj.Title != cur.Title) {
@@ -1174,23 +2003,23 @@ func (m Model) renderLyricsCol(cur *core.Track, posSec float64) []string {
 		spinners := []string{"⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"}
 		spinnerChar := spinners[m.animFrame%len(spinners)]
 		return []string{
-			lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("#00f0ff")).Render("♪ " + truncate(cur.Title, 28) + " ♪"),
-			lipgloss.NewStyle().Foreground(lipgloss.Color("#c084fc")).Render("Artist: " + truncate(cur.Artist, 28)),
+			lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color(currentThemeTheme.Accent)).Render("♪ " + truncate(cur.Title, 28) + " ♪"),
+			lipgloss.NewStyle().Foreground(lipgloss.Color(currentThemeTheme.Secondary)).Render("Artist: " + truncate(cur.Artist, 28)),
 			"",
-			lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("#38bdf8")).Render(spinnerChar + " Syncing lyrics from LRCLIB..."),
-			lipgloss.NewStyle().Foreground(lipgloss.Color("#64748b")).Render("Querying synchronized timestamps"),
+			lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color(currentThemeTheme.Accent)).Render(spinnerChar + " Syncing lyrics from LRCLIB..."),
+			lipgloss.NewStyle().Foreground(lipgloss.Color(currentThemeTheme.Subtext)).Render("Querying synchronized timestamps"),
 			"", "", "", "", "", "",
 		}
 	}
 
 	if lyricsObj.IsFallback {
 		return []string{
-			lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("#00f0ff")).Render("♪ " + truncate(cur.Title, 28) + " ♪"),
-			lipgloss.NewStyle().Foreground(lipgloss.Color("#c084fc")).Render("Artist: " + truncate(cur.Artist, 28)),
-			lipgloss.NewStyle().Foreground(lipgloss.Color("#f43f5e")).Background(lipgloss.Color("#4c0519")).Bold(true).Padding(0, 1).Render("LRCLIB: NO MATCH"),
+			lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color(currentThemeTheme.Accent)).Render("♪ " + truncate(cur.Title, 28) + " ♪"),
+			lipgloss.NewStyle().Foreground(lipgloss.Color(currentThemeTheme.Secondary)).Render("Artist: " + truncate(cur.Artist, 28)),
+			lipgloss.NewStyle().Foreground(lipgloss.Color(currentThemeTheme.Playing)).Bold(true).Render("LRCLIB: NO MATCH"),
 			"",
-			lipgloss.NewStyle().Foreground(lipgloss.Color("#94a3b8")).Render("No online synchronized lyrics found"),
-			lipgloss.NewStyle().Foreground(lipgloss.Color("#64748b")).Render("Drop a .lrc file in folder for offline sync"),
+			lipgloss.NewStyle().Foreground(lipgloss.Color(currentThemeTheme.Subtext)).Render("No online synchronized lyrics found"),
+			lipgloss.NewStyle().Foreground(lipgloss.Color(currentThemeTheme.Subtext)).Render("Drop a .lrc file in folder for offline sync"),
 			"", "", "", "", "",
 		}
 	}
@@ -1198,10 +2027,10 @@ func (m Model) renderLyricsCol(cur *core.Track, posSec float64) []string {
 	lines := lyricsObj.Lines
 	if len(lines) == 0 {
 		return []string{
-			lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("#00f0ff")).Render("♪ " + truncate(cur.Title, 28) + " ♪"),
-			lipgloss.NewStyle().Foreground(lipgloss.Color("#c084fc")).Render("Artist: " + truncate(cur.Artist, 28)),
+			lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color(currentThemeTheme.Accent)).Render("♪ " + truncate(cur.Title, 28) + " ♪"),
+			lipgloss.NewStyle().Foreground(lipgloss.Color(currentThemeTheme.Secondary)).Render("Artist: " + truncate(cur.Artist, 28)),
 			"",
-			lipgloss.NewStyle().Foreground(lipgloss.Color("#94a3b8")).Render("No lyrics available for this track"),
+			lipgloss.NewStyle().Foreground(lipgloss.Color(currentThemeTheme.Subtext)).Render("No lyrics available for this track"),
 			"", "", "", "", "", "", "",
 		}
 	}
@@ -1214,13 +2043,16 @@ func (m Model) renderLyricsCol(cur *core.Track, posSec float64) []string {
 			}
 		}
 	} else {
-
 		if len(lines) > 0 {
 			lastPlayedLineID = (int(posSec/5.0) % len(lines)) + 1
 		}
 	}
 
-	header := lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("#00f0ff")).Render("♪ " + truncate(cur.Title, 45))
+	offsetHint := ""
+	if m.lyricOffset != 0 {
+		offsetHint = fmt.Sprintf(" (%+v)", m.lyricOffset)
+	}
+	header := lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color(currentThemeTheme.Accent)).Render("♪ " + truncate(cur.Title, 35) + offsetHint)
 
 	viewportHeight := 10
 	halfHeight := viewportHeight / 2
@@ -1237,24 +2069,6 @@ func (m Model) renderLyricsCol(cur *core.Track, posSec float64) []string {
 		}
 	}
 
-	lyricsPlayingArrow := lipgloss.NewStyle().
-		Bold(true).
-		Foreground(lipgloss.Color("#f43f5e"))
-
-	lyricsPlayingStyle := lipgloss.NewStyle().
-		Bold(true).
-		Foreground(lipgloss.Color("#ffffff")).
-		Background(lipgloss.Color("#1e1b4b"))
-
-	lyricsPlayedStyle := lipgloss.NewStyle().
-		Foreground(lipgloss.Color("#64748b"))
-
-	lyricsNextStyle := lipgloss.NewStyle().
-		Foreground(lipgloss.Color("#93c5fd"))
-
-	lyricsUpcomingStyle := lipgloss.NewStyle().
-		Foreground(lipgloss.Color("#cbd5e1"))
-
 	var res []string
 	res = append(res, header)
 
@@ -1266,16 +2080,12 @@ func (m Model) renderLyricsCol(cur *core.Track, posSec float64) []string {
 		}
 
 		if lineNum < lastPlayedLineID {
-
 			res = append(res, lyricsPlayedStyle.Render("  "+lineText))
 		} else if lineNum == lastPlayedLineID {
-
 			res = append(res, lyricsPlayingArrow.Render("▶ ")+lyricsPlayingStyle.Render(" "+lineText+" "))
 		} else if lineNum == lastPlayedLineID+1 {
-
 			res = append(res, lyricsNextStyle.Render("  "+lineText))
 		} else {
-
 			res = append(res, lyricsUpcomingStyle.Render("  "+lineText))
 		}
 	}
@@ -1320,7 +2130,7 @@ func (m Model) renderProgressBarBox(totalWidth int) string {
 		h := int((math.Sin(float64(i)*0.25)*0.5 + 0.5) * float64(len(waveBars)-1))
 		r := waveBars[h]
 		if i < filledChars {
-			waveStr.WriteString(lipgloss.NewStyle().Foreground(lipgloss.Color("#7dcfff")).Render(string(r)))
+			waveStr.WriteString(lipgloss.NewStyle().Foreground(lipgloss.Color(currentThemeTheme.Accent)).Render(string(r)))
 		} else {
 			waveStr.WriteString(dimStyle.Render(string(r)))
 		}
@@ -1336,7 +2146,7 @@ func (m Model) renderProgressBarBox(totalWidth int) string {
 	top := renderBoxTop("PROGRESS BAR", boxWidth)
 
 	timeBadge := fmt.Sprintf("[%02d:%02d/%02d:%02d]", posMins, posSeconds, durMins, durSeconds)
-	controls := fmt.Sprintf("[ ◀◀ ] %s [ ▶▶ ]  VOLUME BAR: [%s] %d%%", playBtn, volBar, vol)
+	controls := fmt.Sprintf("[ ◀◀ ] %s [ ▶▶ ]  VOLUME: [%s] %d%%", playBtn, volBar, vol)
 
 	lineContent := fmt.Sprintf(" %s  %s  %s", timeBadge, waveStr.String(), controls)
 	mid := renderBoxLine(lineContent, boxWidth)
@@ -1359,8 +2169,8 @@ func (m Model) renderSearchCommandBar(totalWidth int) string {
 		content = fmt.Sprintf("Search: '%s' (%d total)", m.unifiedQuery, len(m.unifiedAll))
 		rightHint = "[/] Edit │ [Tab] Filter Source │ [Esc] Clear"
 	} else {
-		content = "Press '/' or ':' to search all sources, or type /setting, /library, /nas..."
-		rightHint = "[/] Search All │ [1-9] Tabs"
+		content = "Press '/' to search, [o] actions, [T] themes, [?] shortcuts"
+		rightHint = "[?] Help │ [T] Theme │ [o] Actions"
 	}
 
 	top := renderBoxTop("SEARCH / COMMAND", boxWidth)
@@ -1370,7 +2180,7 @@ func (m Model) renderSearchCommandBar(totalWidth int) string {
 	if m.searching {
 		leftStr = prompt + cyanStyle.Render(content)
 	} else if m.unifiedQuery != "" {
-		leftStr = prompt + lipgloss.NewStyle().Foreground(lipgloss.Color("#EEEEEE")).Bold(true).Render(content)
+		leftStr = prompt + lipgloss.NewStyle().Foreground(lipgloss.Color(currentThemeTheme.Fg)).Bold(true).Render(content)
 	} else {
 		leftStr = prompt + dimStyle.Render(content)
 	}
@@ -1401,7 +2211,6 @@ func (m Model) renderBottomSplitView(totalWidth int) string {
 	}
 
 	heroH := 11
-
 	targetRows := m.height - (heroH + 13)
 	if targetRows < 4 {
 		targetRows = 4
@@ -1448,7 +2257,7 @@ func (m Model) renderLeftListPanel(width int, targetRows int) string {
 
 	if m.unifiedQuery != "" && len(m.unifiedAll) > 0 && (m.currentView == ViewHome || m.currentView == ViewOnline || m.currentView == ViewLibrary) {
 		isUnified = true
-		title = fmt.Sprintf("UNIFIED SEARCH: '%s'", truncate(m.unifiedQuery, 16))
+		title = fmt.Sprintf("SEARCH: '%s'", truncate(m.unifiedQuery, 16))
 		tracks = m.unifiedTracks
 	} else {
 		switch m.currentView {
@@ -1500,7 +2309,7 @@ func (m Model) renderLeftListPanel(width int, targetRows int) string {
 		filterPills := []string{pillAll, pillLocal, pillYT, pillSP, pillJS}
 		for idx, p := range filterPills {
 			if idx == m.searchFilter {
-				filterPills[idx] = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("#FFFFFF")).Background(lipgloss.Color("#3b4261")).Render(p)
+				filterPills[idx] = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color(currentThemeTheme.SelectedFg)).Background(lipgloss.Color(currentThemeTheme.SelectedBg)).Render(p)
 			} else {
 				filterPills[idx] = dimStyle.Render(p)
 			}
@@ -1603,7 +2412,7 @@ func (m Model) renderRightQueuePanel(width int, targetRows int) string {
 		for i := 0; i < centerPadding-1; i++ {
 			lines = append(lines, renderBoxLine("", width))
 		}
-		lines = append(lines, renderBoxLine(centerText("ADD TRACKS TO QUEUE (Press 'a')", width-2), width))
+		lines = append(lines, renderBoxLine(centerText("ADD TRACKS TO QUEUE (Press 'a' / 'Z')", width-2), width))
 		for len(lines) < targetRows+2 {
 			lines = append(lines, renderBoxLine("", width))
 		}
@@ -1651,7 +2460,7 @@ func (m Model) renderSettingsBox(width int, targetRows int) string {
 			lines = append(lines, renderBoxLine(row, width))
 		}
 	}
-	lines = append(lines, renderBoxLine(fmt.Sprintf(" Audio Volume: %d%% │ Cache: %s", m.svc.Config.Audio.Volume, m.svc.Cache.FormattedStats()), width))
+	lines = append(lines, renderBoxLine(fmt.Sprintf(" Audio Volume: %d%% │ Cache: %s │ Theme: %s", m.svc.Config.Audio.Volume, m.svc.Cache.FormattedStats(), m.currentTheme.Name), width))
 
 	for len(lines) < targetRows+2 {
 		lines = append(lines, renderBoxLine("", width))
