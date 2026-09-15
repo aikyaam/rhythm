@@ -219,8 +219,17 @@ var (
 	lyricsUpcomingStyle lipgloss.Style
 	badgeLocal          lipgloss.Style
 	badgeYouTube        lipgloss.Style
+	badgeSoundCloud     lipgloss.Style
 	badgeSpotify        lipgloss.Style
+	badgeAppleMusic     lipgloss.Style
 	badgeJioSaavn       lipgloss.Style
+	badgeGaana          lipgloss.Style
+	badgeMonochrome     lipgloss.Style
+	badgeQobuz          lipgloss.Style
+	badgeShazam         lipgloss.Style
+	badgeSonglink       lipgloss.Style
+	badgeAmazonMusic    lipgloss.Style
+	badgeArchive        lipgloss.Style
 )
 
 func applyTheme(t theme.Theme) {
@@ -252,15 +261,69 @@ func applyTheme(t theme.Theme) {
 		Bold(true).
 		Padding(0, 1)
 
+	badgeSoundCloud = lipgloss.NewStyle().
+		Foreground(lipgloss.Color("#1a1b26")).
+		Background(lipgloss.Color("#ff9e64")).
+		Bold(true).
+		Padding(0, 1)
+
 	badgeSpotify = lipgloss.NewStyle().
 		Foreground(lipgloss.Color("#1a1b26")).
 		Background(lipgloss.Color("#73daca")).
 		Bold(true).
 		Padding(0, 1)
 
+	badgeAppleMusic = lipgloss.NewStyle().
+		Foreground(lipgloss.Color("#1a1b26")).
+		Background(lipgloss.Color("#bb9af7")).
+		Bold(true).
+		Padding(0, 1)
+
 	badgeJioSaavn = lipgloss.NewStyle().
 		Foreground(lipgloss.Color("#1a1b26")).
 		Background(lipgloss.Color("#7dcfff")).
+		Bold(true).
+		Padding(0, 1)
+
+	badgeGaana = lipgloss.NewStyle().
+		Foreground(lipgloss.Color("#FFFFFF")).
+		Background(lipgloss.Color("#ff5a5f")).
+		Bold(true).
+		Padding(0, 1)
+
+	badgeMonochrome = lipgloss.NewStyle().
+		Foreground(lipgloss.Color("#1a1b26")).
+		Background(lipgloss.Color("#2ac3de")).
+		Bold(true).
+		Padding(0, 1)
+
+	badgeQobuz = lipgloss.NewStyle().
+		Foreground(lipgloss.Color("#FFFFFF")).
+		Background(lipgloss.Color("#2980b9")).
+		Bold(true).
+		Padding(0, 1)
+
+	badgeShazam = lipgloss.NewStyle().
+		Foreground(lipgloss.Color("#FFFFFF")).
+		Background(lipgloss.Color("#0088ff")).
+		Bold(true).
+		Padding(0, 1)
+
+	badgeSonglink = lipgloss.NewStyle().
+		Foreground(lipgloss.Color("#1a1b26")).
+		Background(lipgloss.Color("#a9b1d6")).
+		Bold(true).
+		Padding(0, 1)
+
+	badgeAmazonMusic = lipgloss.NewStyle().
+		Foreground(lipgloss.Color("#1a1b26")).
+		Background(lipgloss.Color("#e0af68")).
+		Bold(true).
+		Padding(0, 1)
+
+	badgeArchive = lipgloss.NewStyle().
+		Foreground(lipgloss.Color("#FFFFFF")).
+		Background(lipgloss.Color("#565f89")).
 		Bold(true).
 		Padding(0, 1)
 }
@@ -274,9 +337,9 @@ func InitialModel(svc *cli.AppServices) Model {
 	th := theme.GetTheme(thID)
 	applyTheme(th)
 
-	imgProto := metadata.ProtocolSixel
+	imgProto := metadata.DetectImageProtocol()
 	if svc.Config != nil && svc.Config.Image.Protocol != "" && svc.Config.Image.Protocol != "auto" {
-		imgProto = metadata.ImageProtocol(svc.Config.Image.Protocol)
+		imgProto = metadata.ResolveProtocol(metadata.ImageProtocol(svc.Config.Image.Protocol))
 	}
 
 	m := Model{
@@ -650,10 +713,12 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 		case "tab":
 			if m.unifiedQuery != "" && len(m.unifiedAll) > 0 {
-				m.searchFilter = (m.searchFilter + 1) % 5
-				m.updateUnifiedFilteredList()
-				names := []string{"All", "Local", "YouTube", "Spotify", "JioSaavn"}
-				m.setStatus(fmt.Sprintf("Filter: [%s] (%d tracks)", names[m.searchFilter], len(m.unifiedTracks)))
+				cats := m.getSearchFilterCategories()
+				if len(cats) > 0 {
+					m.searchFilter = (m.searchFilter + 1) % len(cats)
+					m.updateUnifiedFilteredList()
+					m.setStatus(fmt.Sprintf("Filter: [%s] (%d tracks)", cats[m.searchFilter].Name, len(m.unifiedTracks)))
+				}
 				return m, nil
 			}
 
@@ -1036,6 +1101,69 @@ func (m *Model) setStatus(msg string) {
 	m.statusTime = time.Now()
 }
 
+type searchFilterCategory struct {
+	Name      string
+	ShortName string
+	Count     int
+}
+
+func (m Model) getSearchFilterCategories() []searchFilterCategory {
+	cats := []searchFilterCategory{
+		{Name: "All", ShortName: "All", Count: len(m.unifiedAll)},
+		{Name: "Local", ShortName: "Local", Count: len(m.unifiedLocal)},
+	}
+
+	providerNames := []struct {
+		Full  string
+		Short string
+	}{
+		{"YouTube", "YT"},
+		{"SoundCloud", "SC"},
+		{"Spotify", "SP"},
+		{"Apple Music", "APPLE"},
+		{"JioSaavn", "JS"},
+		{"Gaana", "GAANA"},
+		{"Monochrome", "TIDAL"},
+		{"Qobuz", "QOBUZ"},
+		{"Shazam", "SHAZAM"},
+		{"Songlink", "SL"},
+		{"Amazon Music", "AMAZON"},
+		{"Archive.org", "ARCH"},
+	}
+
+	counts := make(map[string]int)
+	for _, t := range m.unifiedOnline {
+		ref := t.RemoteReference
+		if ref == "" {
+			ref = "Online"
+		}
+		counts[ref]++
+	}
+
+	for _, p := range providerNames {
+		if c, exists := counts[p.Full]; exists && c > 0 {
+			cats = append(cats, searchFilterCategory{
+				Name:      p.Full,
+				ShortName: p.Short,
+				Count:     c,
+			})
+			delete(counts, p.Full)
+		}
+	}
+
+	for name, count := range counts {
+		if count > 0 {
+			cats = append(cats, searchFilterCategory{
+				Name:      name,
+				ShortName: name,
+				Count:     count,
+			})
+		}
+	}
+
+	return cats
+}
+
 func (m *Model) updateUnifiedFilteredList() {
 	if len(m.unifiedAll) == 0 {
 		m.unifiedTracks = nil
@@ -1043,35 +1171,24 @@ func (m *Model) updateUnifiedFilteredList() {
 		return
 	}
 
-	switch m.searchFilter {
-	case 1:
-		m.unifiedTracks = m.unifiedLocal
-	case 2:
-		var list []core.Track
-		for _, t := range m.unifiedOnline {
-			if t.RemoteReference == "YouTube" {
-				list = append(list, t)
-			}
-		}
-		m.unifiedTracks = list
-	case 3:
-		var list []core.Track
-		for _, t := range m.unifiedOnline {
-			if t.RemoteReference == "Spotify" {
-				list = append(list, t)
-			}
-		}
-		m.unifiedTracks = list
-	case 4:
-		var list []core.Track
-		for _, t := range m.unifiedOnline {
-			if t.RemoteReference == "JioSaavn" {
-				list = append(list, t)
-			}
-		}
-		m.unifiedTracks = list
-	default:
+	cats := m.getSearchFilterCategories()
+	if m.searchFilter >= len(cats) {
+		m.searchFilter = 0
+	}
+
+	if m.searchFilter == 0 {
 		m.unifiedTracks = m.unifiedAll
+	} else if cats[m.searchFilter].Name == "Local" {
+		m.unifiedTracks = m.unifiedLocal
+	} else {
+		targetName := cats[m.searchFilter].Name
+		var list []core.Track
+		for _, t := range m.unifiedOnline {
+			if strings.EqualFold(t.RemoteReference, targetName) {
+				list = append(list, t)
+			}
+		}
+		m.unifiedTracks = list
 	}
 
 	if m.cursor >= len(m.unifiedTracks) {
@@ -1221,6 +1338,18 @@ func (m *Model) handleSelection() tea.Cmd {
 		}
 
 		err := m.svc.Audio.Play(&trackToPlay)
+		if err != nil && trackToPlay.Source == core.SourceOnline && trackToPlay.LocalPath == "" {
+			trackToPlay.StreamURL = ""
+			url, resolveErr := m.svc.Provider.Resolve(&trackToPlay)
+			if resolveErr == nil && url != "" {
+				if strings.HasPrefix(url, "http://") || strings.HasPrefix(url, "https://") {
+					trackToPlay.StreamURL = url
+				} else {
+					trackToPlay.LocalPath = url
+				}
+				err = m.svc.Audio.Play(&trackToPlay)
+			}
+		}
 		if err == nil {
 			_ = m.svc.History.Record(trackToPlay, 0)
 		}
@@ -1343,7 +1472,7 @@ func (m Model) handleSearchInput(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			m.isSearchingUnified = true
 			m.searchBuffer = ""
 			m.searchFilter = 0
-			m.setStatus(fmt.Sprintf("Searching across Local Library, YouTube, Spotify & JioSaavn for '%s'...", cleanQuery))
+			m.setStatus(fmt.Sprintf("Searching across Local Library, SoundCloud, JioSaavn & Gaana for '%s'...", cleanQuery))
 			return m, unifiedSearchCmd(m.svc, cleanQuery)
 		}
 
@@ -2290,28 +2419,14 @@ func (m Model) renderLeftListPanel(width int, targetRows int) string {
 	lines = append(lines, renderBoxTop(title, width))
 
 	if isUnified {
-		pillAll := fmt.Sprintf("[1:All %d]", len(m.unifiedAll))
-		pillLocal := fmt.Sprintf("[2:Local %d]", len(m.unifiedLocal))
-		var ytCount, spCount, jsCount int
-		for _, t := range m.unifiedOnline {
-			if t.RemoteReference == "YouTube" {
-				ytCount++
-			} else if t.RemoteReference == "Spotify" {
-				spCount++
-			} else if t.RemoteReference == "JioSaavn" {
-				jsCount++
-			}
-		}
-		pillYT := fmt.Sprintf("[3:YT %d]", ytCount)
-		pillSP := fmt.Sprintf("[4:SP %d]", spCount)
-		pillJS := fmt.Sprintf("[5:JS %d]", jsCount)
-
-		filterPills := []string{pillAll, pillLocal, pillYT, pillSP, pillJS}
-		for idx, p := range filterPills {
+		cats := m.getSearchFilterCategories()
+		var filterPills []string
+		for idx, cat := range cats {
+			pill := fmt.Sprintf("[%s %d]", cat.ShortName, cat.Count)
 			if idx == m.searchFilter {
-				filterPills[idx] = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color(currentThemeTheme.SelectedFg)).Background(lipgloss.Color(currentThemeTheme.SelectedBg)).Render(p)
+				filterPills = append(filterPills, lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color(currentThemeTheme.SelectedFg)).Background(lipgloss.Color(currentThemeTheme.SelectedBg)).Render(pill))
 			} else {
-				filterPills[idx] = dimStyle.Render(p)
+				filterPills = append(filterPills, dimStyle.Render(pill))
 			}
 		}
 		filterBar := " " + strings.Join(filterPills, " ")
@@ -2320,7 +2435,7 @@ func (m Model) renderLeftListPanel(width int, targetRows int) string {
 
 	if len(tracks) == 0 {
 		if m.isSearchingUnified {
-			lines = append(lines, renderBoxLine(" ⟳ Searching across Local, YouTube, Spotify & JioSaavn...", width))
+			lines = append(lines, renderBoxLine(" ⟳ Searching across online providers & local library...", width))
 		} else if isUnified {
 			lines = append(lines, renderBoxLine(" No results for this filter. Press [Tab] to switch sources.", width))
 		} else {
@@ -2390,10 +2505,28 @@ func (m Model) renderSourceBadge(t core.Track) string {
 	switch ref {
 	case "YouTube":
 		return badgeYouTube.Render("YT")
+	case "SoundCloud":
+		return badgeSoundCloud.Render("SC")
 	case "Spotify":
 		return badgeSpotify.Render("SPOTIFY")
+	case "Apple Music":
+		return badgeAppleMusic.Render("APPLE")
 	case "JioSaavn":
 		return badgeJioSaavn.Render("JIOSAAVN")
+	case "Gaana":
+		return badgeGaana.Render("GAANA")
+	case "Monochrome", "Tidal":
+		return badgeMonochrome.Render("TIDAL")
+	case "Qobuz":
+		return badgeQobuz.Render("QOBUZ")
+	case "Shazam":
+		return badgeShazam.Render("SHAZAM")
+	case "Songlink":
+		return badgeSonglink.Render("SONGLINK")
+	case "Amazon Music":
+		return badgeAmazonMusic.Render("AMAZON")
+	case "Archive.org":
+		return badgeArchive.Render("ARCHIVE")
 	default:
 		return lipgloss.NewStyle().Foreground(lipgloss.Color("#1a1b26")).Background(lipgloss.Color("#e0af68")).Bold(true).Padding(0, 1).Render("ONLINE")
 	}

@@ -8,6 +8,8 @@ import (
 	"image/color"
 	_ "image/jpeg"
 	"image/png"
+	"os"
+	"runtime"
 	"strings"
 	"sync"
 
@@ -31,12 +33,32 @@ var (
 )
 
 func DetectImageProtocol() ImageProtocol {
+	termProg := strings.ToLower(os.Getenv("TERM_PROGRAM"))
+	term := strings.ToLower(os.Getenv("TERM"))
+	lcTerm := strings.ToLower(os.Getenv("LC_TERMINAL"))
+
+	if os.Getenv("KITTY_WINDOW_ID") != "" || os.Getenv("KITTY_PID") != "" || term == "xterm-kitty" || termProg == "kitty" || os.Getenv("GHOSTTY_RESOURCES_DIR") != "" || term == "xterm-ghostty" || termProg == "ghostty" {
+		return ProtocolKitty
+	}
+
+	if termProg == "iterm.app" || lcTerm == "iterm2" || termProg == "iterm2" || termProg == "wezterm" || os.Getenv("WEZTERM_EXECUTABLE") != "" || os.Getenv("WEZTERM_PANE") != "" {
+		return ProtocolITerm2
+	}
+
+	if runtime.GOOS == "windows" || os.Getenv("WT_SESSION") != "" || termProg == "mintty" || term == "foot" || term == "foot-extra" || termProg == "mlterm" || os.Getenv("XTERM_VERSION") != "" || strings.Contains(term, "sixel") {
+		return ProtocolSixel
+	}
+
+	if runtime.GOOS == "darwin" {
+		return ProtocolITerm2
+	}
+
 	return ProtocolSixel
 }
 
 func ResolveProtocol(p ImageProtocol) ImageProtocol {
 	if p == ProtocolAuto || p == "" {
-		return ProtocolSixel
+		return DetectImageProtocol()
 	}
 	switch strings.ToLower(string(p)) {
 	case "sixel":
@@ -50,7 +72,7 @@ func ResolveProtocol(p ImageProtocol) ImageProtocol {
 	case "halfblock", "halfblocks", "blocks":
 		return ProtocolHalfblocks
 	default:
-		return ProtocolSixel
+		return DetectImageProtocol()
 	}
 }
 

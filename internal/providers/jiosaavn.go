@@ -86,6 +86,9 @@ func (j *JioSaavnProvider) Search(query string, limit int) ([]core.Track, error)
 	}
 
 	trimmed := strings.TrimSpace(query)
+	trimmed = strings.TrimPrefix(trimmed, "jssearch:")
+	trimmed = strings.TrimPrefix(trimmed, "js:")
+	trimmed = strings.TrimSpace(trimmed)
 
 	if matches := jioSaavnURLRegex.FindStringSubmatch(trimmed); len(matches) > 2 {
 		resType := matches[1]

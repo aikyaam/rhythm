@@ -3,6 +3,8 @@ package lyrics
 import (
 	"encoding/json"
 	"fmt"
+	"io"
+	"math"
 	"net/http"
 	"net/url"
 	"os"
@@ -207,17 +209,27 @@ func GetLyrics(track *core.Track) (*Lyrics, error) {
 		}
 	}
 
-	if track.Title != "" {
-		if lrc, err := fetchLRCLIB(track); err == nil && lrc != nil {
+	if lrc, err := fetchLRCLIB(track); err == nil && lrc != nil {
+		if lrc.Synced {
 			lrc.IsFallback = false
 			cacheResult(lrc)
 			return lrc, nil
 		}
 	}
 
-	cleanTitle := cleanSongTitle(track.Title)
-	cleanArtist := cleanArtistName(track.Artist)
+	if lrc, err := fetchLetras(track); err == nil && lrc != nil {
+		lrc.IsFallback = false
+		cacheResult(lrc)
+		return lrc, nil
+	}
 
+	if lrc, err := fetchLRCLIB(track); err == nil && lrc != nil {
+		lrc.IsFallback = false
+		cacheResult(lrc)
+		return lrc, nil
+	}
+
+	artist, title := resolveArtistAndTitle(track)
 	placeholder := &Lyrics{
 		TrackID:    track.ID,
 		Title:      track.Title,
@@ -225,38 +237,195 @@ func GetLyrics(track *core.Track) (*Lyrics, error) {
 		Synced:     false,
 		IsFallback: true,
 		Lines: []LyricLine{
-			{Time: 0 * time.Second, Text: "♪ Lyrics not found on LRCLIB ♪"},
-			{Time: 4 * time.Second, Text: fmt.Sprintf("Title: %s", cleanTitle)},
-			{Time: 8 * time.Second, Text: fmt.Sprintf("Artist: %s", cleanArtist)},
-			{Time: 12 * time.Second, Text: "Place a .lrc file in folder for offline sync"},
+			{Time: 0 * time.Second, Text: "♪ Lyrics not found ♪"},
+			{Time: 4 * time.Second, Text: fmt.Sprintf("Title: %s", title)},
+			{Time: 8 * time.Second, Text: fmt.Sprintf("Artist: %s", artist)},
+			{Time: 12 * time.Second, Text: "Place a .lrc file beside the song for offline sync"},
 		},
 	}
 
 	return placeholder, nil
 }
 
-type lrclibResponse struct {
+type lrclibSearchItem struct {
 	ID           int     `json:"id"`
 	TrackName    string  `json:"trackName"`
 	ArtistName   string  `json:"artistName"`
 	AlbumName    string  `json:"albumName"`
 	Duration     float64 `json:"duration"`
+	Instrumental bool    `json:"instrumental"`
 	SyncedLyrics string  `json:"syncedLyrics"`
 	PlainLyrics  string  `json:"plainLyrics"`
 }
 
-func fetchLRCLIB(track *core.Track) (*Lyrics, error) {
-	cleanTitle := cleanSongTitle(track.Title)
-	if cleanTitle == "" {
-		cleanTitle = track.Title
+var cleanPatterns = []*regexp.Regexp{
+	regexp.MustCompile(`(?i)\s*\([^)]*(?:official|lyrics?|video|audio|mv|visualizer|color\s*coded|hd|4k|prod\.|remastered)[^)]*\)`),
+	regexp.MustCompile(`(?i)\s*\[[^\]]*(?:official|lyrics?|video|audio|mv|visualizer|color\s*coded|hd|4k|prod\.|remastered)[^\]]*\]`),
+	regexp.MustCompile(`(?i)\s*-\s*Topic$`),
+	regexp.MustCompile(`(?i)VEVO$`),
+}
+
+var featPattern = regexp.MustCompile(`(?i)\s*[([]\s*(?:ft\.?|feat\.?|featuring)\s+[^)\]]+[)\]]`)
+
+func cleanMetadata(text string, removeFeaturing bool) string {
+	res := text
+	for _, p := range cleanPatterns {
+		res = p.ReplaceAllString(res, "")
 	}
-	cleanArtist := cleanArtistName(track.Artist)
+	if removeFeaturing {
+		res = featPattern.ReplaceAllString(res, "")
+	}
+	return strings.TrimSpace(res)
+}
+
+func parseTrackQuery(query string) (string, string) {
+	cleaned := cleanMetadata(query, true)
+	separators := []string{" - ", " – ", " — ", " ~ "}
+	for _, sep := range separators {
+		idx := strings.Index(cleaned, sep)
+		if idx > 0 && idx < len(cleaned)-len(sep) {
+			artist := strings.TrimSpace(cleaned[:idx])
+			title := strings.TrimSpace(cleaned[idx+len(sep):])
+			if len(artist) > 0 && len(title) > 0 {
+				return artist, title
+			}
+		}
+	}
+	return "", cleaned
+}
+
+func normalizeComparableText(text string) string {
+	t := cleanMetadata(text, true)
+	t = strings.ToLower(t)
+	var b strings.Builder
+	for _, r := range t {
+		if (r >= 'a' && r <= 'z') || (r >= '0' && r <= '9') || r == ' ' {
+			b.WriteRune(r)
+		}
+	}
+	return strings.Join(strings.Fields(b.String()), " ")
+}
+
+func resolveArtistAndTitle(track *core.Track) (string, string) {
+	if track == nil {
+		return "", ""
+	}
+
+	parsedArtist, parsedTitle := parseTrackQuery(track.Title)
+
+	artist := track.Artist
+	title := parsedTitle
+	if title == "" {
+		title = track.Title
+	}
+
+	if artist == "" || strings.EqualFold(artist, "Unknown") || strings.EqualFold(artist, "YouTube") || strings.EqualFold(artist, "Various Artists") {
+		if parsedArtist != "" {
+			artist = parsedArtist
+		}
+	} else if parsedArtist != "" && !strings.Contains(strings.ToLower(track.Title), strings.ToLower(track.Artist)) {
+		artist = track.Artist
+	}
+
+	title = cleanMetadata(title, true)
+	artist = cleanMetadata(artist, true)
+
+	return artist, title
+}
+
+func selectBestLRCLIBMatch(results []lrclibSearchItem, targetTitle, targetArtist string, targetDuration float64) *lrclibSearchItem {
+	normTitle := normalizeComparableText(targetTitle)
+	normArtist := normalizeComparableText(targetArtist)
+
+	if normTitle == "" {
+		return nil
+	}
+
+	type scoredItem struct {
+		item  *lrclibSearchItem
+		score int
+	}
+
+	var scored []scoredItem
+
+	for i := range results {
+		it := &results[i]
+		if it.Instrumental {
+			continue
+		}
+		if it.SyncedLyrics == "" && it.PlainLyrics == "" {
+			continue
+		}
+
+		itTitle := normalizeComparableText(it.TrackName)
+		itArtist := normalizeComparableText(it.ArtistName)
+
+		titleExact := (itTitle == normTitle)
+		titleContains := strings.Contains(itTitle, normTitle) || strings.Contains(normTitle, itTitle)
+		artistExact := (normArtist != "" && itArtist == normArtist)
+		artistContains := (normArtist != "" && (strings.Contains(itArtist, normArtist) || strings.Contains(normArtist, itArtist)))
+
+		if !titleExact && !titleContains {
+			continue
+		}
+
+		durDelta := 0.0
+		if targetDuration > 0 && it.Duration > 0 {
+			durDelta = math.Abs(targetDuration - it.Duration)
+			if durDelta > 20.0 {
+				continue
+			}
+		}
+
+		score := 0
+		if it.SyncedLyrics != "" {
+			score += 100
+		}
+		if titleExact {
+			score += 50
+		} else if titleContains {
+			score += 20
+		}
+		if artistExact {
+			score += 40
+		} else if artistContains {
+			score += 15
+		}
+		if targetDuration > 0 && it.Duration > 0 {
+			if durDelta <= 3.0 {
+				score += 30
+			} else if durDelta <= 8.0 {
+				score += 15
+			} else if durDelta <= 15.0 {
+				score += 5
+			}
+		}
+
+		scored = append(scored, scoredItem{item: it, score: score})
+	}
+
+	if len(scored) == 0 {
+		return nil
+	}
+
+	sort.Slice(scored, func(i, j int) bool {
+		return scored[i].score > scored[j].score
+	})
+
+	return scored[0].item
+}
+
+func fetchLRCLIB(track *core.Track) (*Lyrics, error) {
+	artist, title := resolveArtistAndTitle(track)
+	if title == "" {
+		return nil, fmt.Errorf("empty title")
+	}
 
 	endpoint := "https://lrclib.net/api/get"
 	params := url.Values{}
-	params.Set("track_name", cleanTitle)
-	if cleanArtist != "" {
-		params.Set("artist_name", cleanArtist)
+	params.Set("track_name", title)
+	if artist != "" {
+		params.Set("artist_name", artist)
 	}
 	if track.Album != "" {
 		params.Set("album_name", track.Album)
@@ -267,12 +436,12 @@ func fetchLRCLIB(track *core.Track) (*Lyrics, error) {
 
 	reqURL := fmt.Sprintf("%s?%s", endpoint, params.Encode())
 	if req, err := http.NewRequest("GET", reqURL, nil); err == nil {
-		req.Header.Set("User-Agent", "RhythmRhythmMusicPlayer/1.0 (https://github.com/aikyaam/rhythm)")
+		req.Header.Set("User-Agent", "RhythmMusicPlayer/2.0")
 		if resp, err := httpClient.Do(req); err == nil {
 			defer resp.Body.Close()
 			if resp.StatusCode == http.StatusOK {
-				var lresp lrclibResponse
-				if err := json.NewDecoder(resp.Body).Decode(&lresp); err == nil {
+				var lresp lrclibSearchItem
+				if err := json.NewDecoder(resp.Body).Decode(&lresp); err == nil && !lresp.Instrumental {
 					if lresp.SyncedLyrics != "" {
 						return ParseLRC(lresp.SyncedLyrics), nil
 					} else if lresp.PlainLyrics != "" {
@@ -284,8 +453,8 @@ func fetchLRCLIB(track *core.Track) (*Lyrics, error) {
 	}
 
 	queries := []string{
-		cleanTitle + " " + cleanArtist,
-		cleanTitle,
+		artist + " " + title,
+		title,
 	}
 
 	for _, q := range queries {
@@ -298,7 +467,7 @@ func fetchLRCLIB(track *core.Track) (*Lyrics, error) {
 		if err != nil {
 			continue
 		}
-		sReq.Header.Set("User-Agent", "RhythmRhythmMusicPlayer/1.0")
+		sReq.Header.Set("User-Agent", "RhythmMusicPlayer/2.0")
 		sResp, err := httpClient.Do(sReq)
 		if err != nil {
 			continue
@@ -306,24 +475,16 @@ func fetchLRCLIB(track *core.Track) (*Lyrics, error) {
 		defer sResp.Body.Close()
 
 		if sResp.StatusCode == http.StatusOK {
-			var items []lrclibResponse
+			var items []lrclibSearchItem
 			if err := json.NewDecoder(sResp.Body).Decode(&items); err == nil && len(items) > 0 {
-				lowerArtist := strings.ToLower(cleanArtist)
-
-				for _, it := range items {
-					if it.SyncedLyrics != "" && (lowerArtist == "" || strings.Contains(strings.ToLower(it.ArtistName), lowerArtist)) {
-						return ParseLRC(it.SyncedLyrics), nil
+				best := selectBestLRCLIBMatch(items, title, artist, track.Duration)
+				if best != nil {
+					if best.SyncedLyrics != "" {
+						return ParseLRC(best.SyncedLyrics), nil
 					}
-				}
-
-				for _, it := range items {
-					if it.SyncedLyrics != "" {
-						return ParseLRC(it.SyncedLyrics), nil
+					if best.PlainLyrics != "" {
+						return ParseLRC(best.PlainLyrics), nil
 					}
-				}
-
-				if items[0].PlainLyrics != "" {
-					return ParseLRC(items[0].PlainLyrics), nil
 				}
 			}
 		}
@@ -332,27 +493,189 @@ func fetchLRCLIB(track *core.Track) (*Lyrics, error) {
 	return nil, fmt.Errorf("lyrics not found on lrclib")
 }
 
-func cleanSongTitle(t string) string {
-	re := regexp.MustCompile(`(?i)\(.*?official.*?\)|\[.*?official.*?\]|\(feat\..*?\)|\(with.*?\)|\[.*?remastered.*?\]|\(.*?video.*?\)|\[.*?video.*?\]|\(.*?lyric.*?\)|\[.*?lyric.*?\]|\(audio\)|\[audio\]|\(from .*?\)`)
-	clean := re.ReplaceAllString(t, "")
-	if idx := strings.Index(clean, " - "); idx != -1 {
-		clean = clean[:idx]
+func parseLetrasSubtitle(subRaw string) []LyricLine {
+	var entries [][]string
+	if err := json.Unmarshal([]byte(subRaw), &entries); err != nil {
+		return nil
 	}
-	if idx := strings.Index(clean, " | "); idx != -1 {
-		clean = clean[:idx]
+	var res []LyricLine
+	for _, entry := range entries {
+		if len(entry) < 2 {
+			continue
+		}
+		txt := strings.TrimSpace(entry[0])
+		if txt == "" {
+			continue
+		}
+		sec, err := strconv.ParseFloat(entry[1], 64)
+		if err != nil {
+			continue
+		}
+		res = append(res, LyricLine{
+			Time: time.Duration(sec * float64(time.Second)),
+			Text: txt,
+		})
 	}
-	clean = strings.TrimSuffix(clean, "...")
-	return strings.TrimSpace(clean)
+	sort.Slice(res, func(i, j int) bool {
+		return res[i].Time < res[j].Time
+	})
+	return res
 }
 
-func cleanArtistName(a string) string {
-	delims := []string{" - ", " – ", " — ", ",", "&", "/", " feat", " ft.", " with "}
-	clean := a
-	for _, d := range delims {
-		if idx := strings.Index(strings.ToLower(clean), d); idx != -1 {
-			clean = clean[:idx]
+func fetchLetras(track *core.Track) (*Lyrics, error) {
+	artist, title := resolveArtistAndTitle(track)
+	if title == "" {
+		return nil, fmt.Errorf("empty title")
+	}
+
+	q := strings.TrimSpace(artist + " " + title)
+	solrURL := fmt.Sprintf("https://solr.sscdn.co/letras/m1/?q=%s&wt=json&callback=LetrasSug", url.QueryEscape(q))
+	req, err := http.NewRequest("GET", solrURL, nil)
+	if err != nil {
+		return nil, err
+	}
+	req.Header.Set("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64)")
+	resp, err := httpClient.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, err
+	}
+	raw := string(body)
+	start := strings.Index(raw, "(")
+	end := strings.LastIndex(raw, ")")
+	if start == -1 || end <= start {
+		return nil, fmt.Errorf("invalid jsonp")
+	}
+	jsonStr := raw[start+1 : end]
+
+	var solrRes struct {
+		Response struct {
+			Docs []struct {
+				Txt string `json:"txt"`
+				Art string `json:"art"`
+				Dns string `json:"dns"`
+				Url string `json:"url"`
+				T   string `json:"t"`
+			} `json:"docs"`
+		} `json:"response"`
+	}
+
+	if err := json.Unmarshal([]byte(jsonStr), &solrRes); err != nil {
+		return nil, err
+	}
+
+	normTitle := normalizeComparableText(title)
+	normArtist := normalizeComparableText(artist)
+
+	var bestDns, bestUrl string
+	for _, doc := range solrRes.Response.Docs {
+		if doc.T != "2" || doc.Dns == "" || doc.Url == "" {
+			continue
+		}
+		docTitle := normalizeComparableText(doc.Txt)
+		docArt := normalizeComparableText(doc.Art)
+		if docTitle == normTitle && (normArtist == "" || docArt == normArtist) {
+			bestDns = doc.Dns
+			bestUrl = doc.Url
+			break
+		}
+		if docTitle == normTitle {
+			bestDns = doc.Dns
+			bestUrl = doc.Url
 		}
 	}
-	clean = strings.TrimSuffix(clean, "...")
-	return strings.TrimSpace(clean)
+
+	if bestDns == "" && len(solrRes.Response.Docs) > 0 {
+		for _, doc := range solrRes.Response.Docs {
+			if doc.T == "2" && doc.Dns != "" && doc.Url != "" {
+				docTitle := normalizeComparableText(doc.Txt)
+				if strings.Contains(docTitle, normTitle) || strings.Contains(normTitle, docTitle) {
+					bestDns = doc.Dns
+					bestUrl = doc.Url
+					break
+				}
+			}
+		}
+	}
+
+	if bestDns == "" || bestUrl == "" {
+		return nil, fmt.Errorf("no matching letras doc")
+	}
+
+	pageURL := fmt.Sprintf("https://www.letras.mus.br/%s/%s/", bestDns, bestUrl)
+	pReq, err := http.NewRequest("GET", pageURL, nil)
+	if err != nil {
+		return nil, err
+	}
+	pReq.Header.Set("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64)")
+	pResp, err := httpClient.Do(pReq)
+	if err != nil {
+		return nil, err
+	}
+	defer pResp.Body.Close()
+
+	pageBody, err := io.ReadAll(pResp.Body)
+	if err != nil {
+		return nil, err
+	}
+	html := string(pageBody)
+
+	omqRe := regexp.MustCompile(`_omq\.push\(\['ui/lyric',\s*({[\s\S]*?})\s*,`)
+	match := omqRe.FindStringSubmatch(html)
+	if len(match) > 1 {
+		var omq struct {
+			ID        int    `json:"ID"`
+			YoutubeID string `json:"YoutubeID"`
+			Name      string `json:"Name"`
+		}
+		if err := json.Unmarshal([]byte(match[1]), &omq); err == nil && omq.ID != 0 && omq.YoutubeID != "" {
+			subURL := fmt.Sprintf("https://www.letras.mus.br/api/v2/subtitle/%d/%s/", omq.ID, omq.YoutubeID)
+			sReq, err := http.NewRequest("GET", subURL, nil)
+			if err == nil {
+				sReq.Header.Set("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64)")
+				if sResp, err := httpClient.Do(sReq); err == nil {
+					defer sResp.Body.Close()
+					if sResp.StatusCode == http.StatusOK {
+						var subApiRes struct {
+							Status   string `json:"status"`
+							Original struct {
+								Subtitle string `json:"Subtitle"`
+							} `json:"Original"`
+						}
+						if err := json.NewDecoder(sResp.Body).Decode(&subApiRes); err == nil {
+							if subApiRes.Status != "not found" && subApiRes.Original.Subtitle != "" {
+								lines := parseLetrasSubtitle(subApiRes.Original.Subtitle)
+								if len(lines) > 0 {
+									return &Lyrics{
+										Synced: true,
+										Lines:  lines,
+									}, nil
+								}
+							}
+						}
+					}
+				}
+			}
+		}
+	}
+
+	lyricDivRe := regexp.MustCompile(`(?i)<div class="lyric-original[^>]*>([\s\S]*?)</div>`)
+	divMatch := lyricDivRe.FindStringSubmatch(html)
+	if len(divMatch) > 1 {
+		text := divMatch[1]
+		text = regexp.MustCompile(`(?i)<br\s*/?>`).ReplaceAllString(text, "\n")
+		text = regexp.MustCompile(`(?i)</p>`).ReplaceAllString(text, "\n")
+		text = regexp.MustCompile(`<[^>]+>`).ReplaceAllString(text, "")
+		parsed := ParseLRC(text)
+		if parsed != nil && len(parsed.Lines) > 0 {
+			return parsed, nil
+		}
+	}
+
+	return nil, fmt.Errorf("no lyrics on letras")
 }

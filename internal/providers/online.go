@@ -20,30 +20,40 @@ type MusicProvider interface {
 }
 
 type CompositeProvider struct {
-	providers []MusicProvider
-	jiosaavn  *JioSaavnProvider
-	youtube   *YouTubeProvider
-	spotify   *SpotifyProvider
-	archive   *ArchiveProvider
+	providers  []MusicProvider
+	soundcloud *SoundCloudProvider
+	jiosaavn   *JioSaavnProvider
+	monochrome *MonochromeProvider
+	gaana      *GaanaProvider
+	songlink   *SongLinkProvider
+	archive    *ArchiveProvider
 }
 
 func NewDefaultProvider() *CompositeProvider {
-	yt := NewYouTubeProvider()
+	sc := NewSoundCloudProvider()
 	js := NewJioSaavnProvider()
-	sp := NewSpotifyProvider(yt)
+	mc := NewMonochromeProvider()
+	gn := NewGaanaProvider(sc)
+	sl := NewSongLinkProvider(sc)
 	arch := NewArchiveProvider()
 
+	all := []MusicProvider{
+		sc,
+		js,
+		gn,
+		mc,
+		sl,
+		arch,
+	}
+
 	return &CompositeProvider{
-		providers: []MusicProvider{
-			yt,
-			sp,
-			js,
-			arch,
-		},
-		youtube:  yt,
-		spotify:  sp,
-		jiosaavn: js,
-		archive:  arch,
+		providers:  all,
+		soundcloud: sc,
+		jiosaavn:   js,
+		monochrome: mc,
+		gaana:      gn,
+		songlink:   sl,
+		archive:    arch,
 	}
 }
 
@@ -51,32 +61,51 @@ func (c *CompositeProvider) Name() string {
 	return "Composite Online Provider"
 }
 
+func (c *CompositeProvider) hasSearchPrefix(q string) bool {
+	prefixes := []string{
+		"scsearch:", "sc:",
+		"jssearch:", "js:",
+		"mcsearch:", "mc:", "tidal:",
+		"gnsearch:", "gn:", "gaanasearch:",
+		"slsearch:", "sl:", "songlink:", "odesli:",
+		"archsearch:", "arch:", "archive:",
+	}
+	for _, p := range prefixes {
+		if strings.HasPrefix(q, p) {
+			return true
+		}
+	}
+	return false
+}
+
 func (c *CompositeProvider) Search(query string, limit int) ([]core.Track, error) {
 	trimmed := strings.TrimSpace(query)
 
-	if strings.HasPrefix(trimmed, "spsearch:") || strings.Contains(trimmed, "open.spotify.com") || strings.HasPrefix(trimmed, "spotify:") {
-		return c.spotify.Search(trimmed, limit)
+	if strings.HasPrefix(trimmed, "scsearch:") || strings.HasPrefix(trimmed, "sc:") || strings.Contains(trimmed, "soundcloud.com") || strings.Contains(trimmed, "on.soundcloud.com") {
+		return c.soundcloud.Search(trimmed, limit)
 	}
-	if strings.HasPrefix(trimmed, "ytsearch:") || strings.Contains(trimmed, "youtube.com") || strings.Contains(trimmed, "youtu.be") {
-		return c.youtube.Search(strings.TrimPrefix(trimmed, "ytsearch:"), limit)
+	if strings.HasPrefix(trimmed, "jssearch:") || strings.HasPrefix(trimmed, "js:") || strings.Contains(trimmed, "jiosaavn.com") {
+		return c.jiosaavn.Search(trimmed, limit)
 	}
-	if strings.HasPrefix(trimmed, "jssearch:") || strings.Contains(trimmed, "jiosaavn.com") {
-		return c.jiosaavn.Search(strings.TrimPrefix(trimmed, "jssearch:"), limit)
+	if strings.HasPrefix(trimmed, "mcsearch:") || strings.HasPrefix(trimmed, "mc:") || strings.HasPrefix(trimmed, "tidal:") || strings.Contains(trimmed, "monochrome.tf") || strings.Contains(trimmed, "tidal.com") {
+		return c.monochrome.Search(trimmed, limit)
+	}
+	if strings.HasPrefix(trimmed, "gnsearch:") || strings.HasPrefix(trimmed, "gn:") || strings.HasPrefix(trimmed, "gaanasearch:") || strings.Contains(trimmed, "gaana.com") {
+		return c.gaana.Search(trimmed, limit)
+	}
+	if strings.HasPrefix(trimmed, "slsearch:") || strings.HasPrefix(trimmed, "sl:") || strings.HasPrefix(trimmed, "songlink:") || strings.HasPrefix(trimmed, "odesli:") || strings.Contains(trimmed, "song.link") || strings.Contains(trimmed, "odesli.co") {
+		return c.songlink.Search(trimmed, limit)
+	}
+	if strings.HasPrefix(trimmed, "archsearch:") || strings.HasPrefix(trimmed, "arch:") || strings.HasPrefix(trimmed, "archive:") || strings.Contains(trimmed, "archive.org") {
+		clean := strings.TrimPrefix(trimmed, "archsearch:")
+		clean = strings.TrimPrefix(clean, "archive:")
+		clean = strings.TrimPrefix(clean, "arch:")
+		return c.archive.Search(strings.TrimSpace(clean), limit)
 	}
 
-	results, err := c.youtube.Search(trimmed, limit)
-	if err == nil && len(results) > 0 {
-		return results, nil
-	}
-
-	results, err = c.jiosaavn.Search(trimmed, limit)
-	if err == nil && len(results) > 0 {
-		return results, nil
-	}
-
-	results, err = c.archive.Search(trimmed, limit)
-	if err == nil && len(results) > 0 {
-		return results, nil
+	unified := c.SearchUnified(trimmed, limit)
+	if len(unified) > 0 {
+		return unified, nil
 	}
 
 	return nil, fmt.Errorf("no search results from online providers for query: %s", query)
@@ -88,15 +117,8 @@ func (c *CompositeProvider) SearchUnified(query string, limit int) []core.Track 
 		return nil
 	}
 
-	if strings.Contains(trimmed, "open.spotify.com") || strings.HasPrefix(trimmed, "spotify:") {
-		res, err := c.spotify.Search(trimmed, limit)
-		if err == nil && len(res) > 0 {
-			return res
-		}
-	}
-
-	if strings.Contains(trimmed, "youtube.com") || strings.Contains(trimmed, "youtu.be") {
-		res, err := c.youtube.Search(trimmed, limit)
+	if c.hasSearchPrefix(trimmed) || strings.Contains(trimmed, "://") {
+		res, err := c.Search(trimmed, limit)
 		if err == nil && len(res) > 0 {
 			return res
 		}
@@ -106,31 +128,57 @@ func (c *CompositeProvider) SearchUnified(query string, limit int) []core.Track 
 	var wg sync.WaitGroup
 	var results []core.Track
 
-	perLimit := limit
+	perLimit := limit / 2
 	if perLimit < 5 {
 		perLimit = 5
 	}
 
-	wg.Add(2)
-	go func() {
-		defer wg.Done()
-		ytTracks, err := c.youtube.Search(trimmed, perLimit)
-		if err == nil && len(ytTracks) > 0 {
-			mu.Lock()
-			results = append(results, ytTracks...)
-			mu.Unlock()
-		}
-	}()
+	searchers := []func(){
+		func() {
+			defer func() { recover() }()
+			scTracks, err := c.soundcloud.Search(trimmed, perLimit)
+			if err == nil && len(scTracks) > 0 {
+				mu.Lock()
+				results = append(results, scTracks...)
+				mu.Unlock()
+			}
+		},
+		func() {
+			defer func() { recover() }()
+			jsTracks, err := c.jiosaavn.Search(trimmed, perLimit)
+			if err == nil && len(jsTracks) > 0 {
+				mu.Lock()
+				results = append(results, jsTracks...)
+				mu.Unlock()
+			}
+		},
+		func() {
+			defer func() { recover() }()
+			gnTracks, err := c.gaana.Search(trimmed, perLimit)
+			if err == nil && len(gnTracks) > 0 {
+				mu.Lock()
+				results = append(results, gnTracks...)
+				mu.Unlock()
+			}
+		},
+		func() {
+			defer func() { recover() }()
+			mcTracks, err := c.monochrome.Search(trimmed, perLimit)
+			if err == nil && len(mcTracks) > 0 {
+				mu.Lock()
+				results = append(results, mcTracks...)
+				mu.Unlock()
+			}
+		},
+	}
 
-	go func() {
-		defer wg.Done()
-		jsTracks, err := c.jiosaavn.Search(trimmed, perLimit)
-		if err == nil && len(jsTracks) > 0 {
-			mu.Lock()
-			results = append(results, jsTracks...)
-			mu.Unlock()
-		}
-	}()
+	wg.Add(len(searchers))
+	for _, fn := range searchers {
+		go func(f func()) {
+			defer wg.Done()
+			f()
+		}(fn)
+	}
 
 	wg.Wait()
 	return results
@@ -138,22 +186,40 @@ func (c *CompositeProvider) SearchUnified(query string, limit int) []core.Track 
 
 func (c *CompositeProvider) Resolve(track *core.Track) (string, error) {
 	for _, p := range c.providers {
-		if p.Name() == track.RemoteReference {
+		if strings.EqualFold(p.Name(), track.RemoteReference) {
 			streamURL, err := p.Resolve(track)
-			if err == nil && streamURL != "" {
+			if err == nil && streamURL != "" && !strings.Contains(streamURL, "AudioPreview") && !strings.Contains(streamURL, "mzaf_") {
 				return streamURL, nil
 			}
 		}
 	}
 
-	for _, p := range c.providers {
+	streamProviders := []MusicProvider{
+		c.jiosaavn,
+		c.soundcloud,
+		c.monochrome,
+		c.gaana,
+	}
+
+	for _, p := range streamProviders {
 		streamURL, err := p.Resolve(track)
-		if err == nil && streamURL != "" {
+		if err == nil && streamURL != "" && !strings.Contains(streamURL, "AudioPreview") {
 			return streamURL, nil
 		}
 	}
 
-	return "", fmt.Errorf("failed to resolve audio stream for track: %s", track.Title)
+	query := fmt.Sprintf("%s %s", track.Title, track.Artist)
+	for _, p := range streamProviders {
+		candidates, err := p.Search(query, 3)
+		if err == nil && len(candidates) > 0 {
+			streamURL, err := p.Resolve(&candidates[0])
+			if err == nil && streamURL != "" && !strings.Contains(streamURL, "AudioPreview") {
+				return streamURL, nil
+			}
+		}
+	}
+
+	return "", fmt.Errorf("failed to resolve full audio stream for track: %s", track.Title)
 }
 
 type ArchiveProvider struct {

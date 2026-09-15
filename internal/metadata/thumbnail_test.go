@@ -3,6 +3,7 @@ package metadata
 import (
 	"image"
 	"image/color"
+	"os"
 	"strings"
 	"testing"
 
@@ -110,4 +111,28 @@ func min(a, b int) int {
 		return a
 	}
 	return b
+}
+
+func TestDetectImageProtocol(t *testing.T) {
+	origKitty := os.Getenv("KITTY_WINDOW_ID")
+	origTermProg := os.Getenv("TERM_PROGRAM")
+	defer func() {
+		os.Setenv("KITTY_WINDOW_ID", origKitty)
+		os.Setenv("TERM_PROGRAM", origTermProg)
+	}()
+
+	os.Setenv("KITTY_WINDOW_ID", "123")
+	if proto := DetectImageProtocol(); proto != ProtocolKitty {
+		t.Fatalf("expected ProtocolKitty, got %v", proto)
+	}
+
+	os.Setenv("KITTY_WINDOW_ID", "")
+	os.Setenv("TERM_PROGRAM", "iTerm.app")
+	if proto := DetectImageProtocol(); proto != ProtocolITerm2 {
+		t.Fatalf("expected ProtocolITerm2, got %v", proto)
+	}
+
+	if res := ResolveProtocol(ProtocolAuto); res == "" {
+		t.Fatalf("expected resolved protocol, got empty")
+	}
 }

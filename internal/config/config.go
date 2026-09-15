@@ -102,7 +102,7 @@ func DefaultConfig() *Config {
 			Quit:       "ctrl+c",
 		},
 		Image: ImageConfig{
-			Protocol: "sixel",
+			Protocol: "auto",
 			Width:    22,
 			Height:   11,
 		},
