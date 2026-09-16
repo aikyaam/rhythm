@@ -35,9 +35,7 @@ i built this because i wanted something fast, hackable, and that didn't need me 
   - SongLink / Odesli (finds links across platforms)
   - Archive.org (public domain, live recordings)
   - your local files (FLAC, MP3, M4A, WAV, Opus, AAC)
-- **no preview garbage** — if a source only has a 30s preview, rhythm automatically falls back to YouTube or another source for the full track. you never get cut off.
 - **synced lyrics** — fetches from LRCLIB and highlights the current line in real time. you can nudge the timing with `[` and `]` if it's off.
-- **album art in terminal** — renders cover art as halfblocks, braille, sixel, kitty, or iterm2 depending on what your terminal supports. press `v` to cycle through modes.
 - **server mode** — run `rhythm-server` on a box connected to speakers (raspberry pi, NAS, whatever) and control it from your laptop over the network.
 
 ---
