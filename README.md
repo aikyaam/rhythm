@@ -149,6 +149,11 @@ Usage of rhythm-server:
 ## Demo
 
 Experience Rhythm in action directly from your terminal or explore the repository releases:
+
+<p align="center">
+  <img src="assets/screenshot.png" alt="Rhythm Terminal Interface" width="100%">
+</p>
+
 - [x] [**Latest Release Binaries**](https://github.com/aikyaam/rhythm/releases/latest)
 - [x] [**Explore Server Setup & Examples**](#examples)
 
