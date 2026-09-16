@@ -148,11 +148,17 @@ Usage of rhythm-server:
 
 ## Demo
 
-Experience Rhythm in action directly from your terminal or explore the repository releases:
+Experience Rhythm in action directly from your terminal:
 
 <p align="center">
   <img src="assets/screenshot.png" alt="Rhythm Terminal Interface" width="100%">
 </p>
+
+| **Live Synced Lyrics (LRCLIB)** | **Theme Switcher (`T`)** |
+|:---:|:---:|
+| <img src="assets/screen3.png" width="100%" alt="Synced Lyrics"> | <img src="assets/screen1.png" width="100%" alt="Themes"> |
+| **Track Actions Menu (`o`)** | **Shortcuts Overlay (`?`)** |
+| <img src="assets/screen4.png" width="100%" alt="Actions Menu"> | <img src="assets/screen2.png" width="100%" alt="Shortcuts"> |
 
 - [x] [**Latest Release Binaries**](https://github.com/aikyaam/rhythm/releases/latest)
 - [x] [**Explore Server Setup & Examples**](#examples)
