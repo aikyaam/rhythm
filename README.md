@@ -7,197 +7,161 @@
 
 # Rhythm
 
-Rhythm is a blazing-fast, terminal-native music player and distributed streaming server written in Go. Engineered with a cyberpunk Bubbletea TUI, a pure native audio decoding pipeline, multi-source streaming resolution, synchronized LRC lyrics, and a headless client-server architecture for home labs and remote workstations.
+a music player that lives in your terminal. no electron, no browser, no bullshit — just a TUI written in Go that can pull songs from JioSaavn, SoundCloud, Gaana, Tidal, Archive.org, or your own local library and play them right there in the shell.
 
-## Summary
+i built this because i wanted something fast, hackable, and that didn't need me to open a browser just to listen to music. it's still early days but it works well enough that i'm using it daily.
 
-1. [Features](#features)
-2. [Getting Started](#getting-started)
-3. [Architecture](#architecture)
-4. [Documentation](#documentation)
-5. [Demo](#demo)
-6. [Examples](#examples)
-7. [License](#license)
+## what's in here
 
-### Features
-
-- [x] **Terminal-Native Bubbletea UI**: Ultra-responsive, modern terminal interface built on the Elm architecture with [Bubbletea](https://github.com/charmbracelet/bubbletea) and styled with [Lipgloss](https://github.com/charmbracelet/lipgloss).
-- [x] **Pure Go Audio Engine**: Direct hardware audio output via Oto and Beep with zero external C-dependencies (`CGO_ENABLED=0`) across Linux, macOS, and Windows.
-- [x] **Multi-Source Music Resolution**: Unified, seamless playback across streaming providers and local collections:
-  - **SoundCloud**: Direct high-bitrate audio streaming with rich artist metadata.
-  - **JioSaavn**: High-fidelity 320kbps & 160kbps streaming audio streams.
-  - **Gaana**: HLS stream resolution and playback.
-  - **Monochrome / Tidal**: High-resolution FLAC and AAC lossless streaming.
-  - **SongLink / Odesli**: Universal metadata resolution and cross-platform song tracking.
-  - **Archive.org**: Streaming access to millions of public domain recordings and live concerts.
-  - **Local Library**: High-performance local library indexer with tag extraction (FLAC, MP3, M4A, WAV, Opus, AAC).
-- [x] **Smart Fallback & Zero-Preview Policy**: Transparently bypasses 30-second previews and resolved paywalls by dynamically switching to active lossless and direct stream backends.
-- [x] **Synchronized Lyrics**: Automated real-time lyrics fetching with millisecond-accurate highlighting powered by the LRCLIB engine.
-- [x] **ASCII Album Art Renderer**: Real-time pixel-to-ANSI half-block artwork conversion dynamically rendered in the terminal window.
-- [x] **Distributed Client-Server Mode**: Deploy `rhythm-server` as a headless background daemon on your NAS, Home Lab, or VPS, and control audio output remotely from any terminal.
+1. [what it does](#what-it-does)
+2. [getting it running](#getting-it-running)
+3. [how it works](#how-it-works)
+4. [keybindings](#keybindings)
+5. [screenshots](#screenshots)
+6. [examples](#examples)
+7. [license](#license)
 
 ---
 
-## Getting Started
+## what it does
 
-### Installing Pre-Built Binaries
+- **terminal UI** — built with [Bubbletea](https://github.com/charmbracelet/bubbletea). keyboard-driven, fast, no mouse needed.
+- **pure Go audio** — uses Oto + Beep for audio output. no CGO, no native libs, builds cross-platform cleanly.
+- **multi-source search** — press `/` and it searches across everything at once:
+  - JioSaavn (320kbps AAC)
+  - SoundCloud
+  - Gaana (HLS)
+  - Monochrome / Tidal (lossless FLAC/AAC)
+  - SongLink / Odesli (finds links across platforms)
+  - Archive.org (public domain, live recordings)
+  - your local files (FLAC, MP3, M4A, WAV, Opus, AAC)
+- **no preview garbage** — if a source only has a 30s preview, rhythm automatically falls back to YouTube or another source for the full track. you never get cut off.
+- **synced lyrics** — fetches from LRCLIB and highlights the current line in real time. you can nudge the timing with `[` and `]` if it's off.
+- **album art in terminal** — renders cover art as halfblocks, braille, sixel, kitty, or iterm2 depending on what your terminal supports. press `v` to cycle through modes.
+- **server mode** — run `rhythm-server` on a box connected to speakers (raspberry pi, NAS, whatever) and control it from your laptop over the network.
 
-Pre-compiled statically linked binaries for Linux, macOS, and Windows (amd64 & arm64) are available on our [GitHub Releases](https://github.com/aikyaam/rhythm/releases) page.
+---
 
-Download and unpack the latest release for your platform:
+## getting it running
 
-#### Linux & macOS
+### pre-built binaries
 
+grab the latest from [releases](https://github.com/aikyaam/rhythm/releases). linux, macOS, and windows on both amd64 and arm64.
+
+**linux / macOS:**
 ```bash
-# Download latest release (replace with target architecture)
-curl -fsSL -o rhythm.tar.gz https://github.com/aikyaam/rhythm/releases/latest/download/rhythm-v1.0.0-linux-amd64.tar.gz
+curl -fsSL -o rhythm.tar.gz https://github.com/aikyaam/rhythm/releases/latest/download/rhythm-v0.1.0-linux-amd64.tar.gz
 tar -xzf rhythm.tar.gz
 sudo mv rhythm-linux-amd64/rhythm /usr/local/bin/
 sudo mv rhythm-linux-amd64/rhythm-server /usr/local/bin/
 ```
 
-#### Windows (PowerShell)
-
+**windows (powershell):**
 ```powershell
-Invoke-WebRequest -Uri "https://github.com/aikyaam/rhythm/releases/latest/download/rhythm-v1.0.0-windows-amd64.zip" -OutFile "rhythm.zip"
+Invoke-WebRequest -Uri "https://github.com/aikyaam/rhythm/releases/latest/download/rhythm-v0.1.0-windows-amd64.zip" -OutFile "rhythm.zip"
 Expand-Archive -Path "rhythm.zip" -DestinationPath "$HOME\rhythm"
-# Add $HOME\rhythm to your user PATH
+# then add $HOME\rhythm to your PATH
 ```
 
-### Install with Go
-
-If you have Go installed on your workstation:
+### via go install
 
 ```bash
-# Install TUI Client
 go install github.com/aikyaam/rhythm/cmd/rhythm@latest
-
-# Install Headless Server
 go install github.com/aikyaam/rhythm/cmd/rhythm-server@latest
 ```
 
-### Building From Source
+### build from source
 
 ```bash
 git clone https://github.com/aikyaam/rhythm.git
 cd rhythm
-
-# Build TUI client
 go build -trimpath -ldflags="-s -w" -o bin/rhythm ./cmd/rhythm
-
-# Build Headless server
 go build -trimpath -ldflags="-s -w" -o bin/rhythm-server ./cmd/rhythm-server
 ```
 
 ---
 
-## Architecture
+## how it works
 
-Rhythm can run in two modes depending on your workflow:
+two modes:
 
-- **Standalone Mode**: The default mode. Running `rhythm` boots both the local audio engine and the interactive Bubbletea interface inside your active terminal.
-- **Server / Daemon Mode**: Running `rhythm-server` boots a headless HTTP & WebSocket control daemon on your server or NAS. You can connect to it remotely via `rhythm --server http://nas-ip:8080` to manage queues and stream playback.
+- **standalone** — just run `rhythm`. everything runs locally, audio plays through your machine.
+- **server mode** — run `rhythm-server` on a remote box (raspberry pi, VPS, NAS). then connect to it from anywhere with `rhythm --server http://192.168.1.x:8080`. the audio plays on the server side, you control it from your terminal.
+
+flags for `rhythm`:
+```
+--server    connect to a rhythm-server (e.g. http://nas:8080)
+--config    custom config file path (default: ~/.config/rhythm/config.json)
+--version   print version and exit
+```
+
+flags for `rhythm-server`:
+```
+--port       port to listen on (default: 8080)
+--host       host to bind (default: 0.0.0.0)
+--music-dir  path to music folder to index
+--db         sqlite db path (default: ~/.config/rhythm/server.db)
+```
 
 ---
 
-## Documentation
+## keybindings
 
-### Command Line Flags
-
-#### `rhythm` (TUI Client)
-
-```text
-Usage of rhythm:
-  --server string
-        Connect to a remote rhythm-server instance (e.g. http://192.168.1.50:8080)
-  --config string
-        Custom configuration file path (default: ~/.config/rhythm/config.json)
-  --version
-        Print version information and exit
-```
-
-#### `rhythm-server` (Headless Daemon)
-
-```text
-Usage of rhythm-server:
-  --port int
-        Port to listen on (default: 8080)
-  --host string
-        Host address to bind to (default: 0.0.0.0)
-  --music-dir string
-        Path to local/NAS music directory to scan and index
-  --db string
-        Path to persistent SQLite database (default: ~/.config/rhythm/server.db)
-```
-
-### Keybindings
-
-| Key | Action |
-|:---|:---|
-| <kbd>/</kbd> | Open Search Bar across all active providers |
-| <kbd>Enter</kbd> | Play selected track / Activate item |
-| <kbd>Space</kbd> | Pause / Resume audio playback |
-| <kbd>s</kbd> | Stop playback |
-| <kbd>j</kbd> / <kbd>↓</kbd> | Navigate down |
-| <kbd>k</kbd> / <kbd>↑</kbd> | Navigate up |
-| <kbd>Tab</kbd> / <kbd>Shift+Tab</kbd> | Switch panes (Library, Search, Queue, Lyrics) |
-| <kbd>l</kbd> | Toggle synchronized lyrics overlay |
-| <kbd>q</kbd> / <kbd>Ctrl+C</kbd> | Quit application |
+| key | what it does |
+|:----|:-------------|
+| `/` | search everything |
+| `Enter` | play |
+| `Space` | pause / resume |
+| `n` / `p` | next / previous |
+| `j` / `k` or `↓` / `↑` | move through list |
+| `Tab` / `Shift+Tab` | switch between panes |
+| `l` | toggle lyrics |
+| `v` | cycle album art render mode |
+| `w` | pop out full-res cover art window |
+| `t` / `T` | theme switcher |
+| `o` | actions menu on selected track |
+| `f` | favorite toggle |
+| `[` / `]` | lyric sync offset ±250ms |
+| `q` / `Esc` | go back / close popup / quit |
 
 ---
 
-## Demo
-
-Experience Rhythm in action directly from your terminal:
+## screenshots
 
 <p align="center">
-  <img src="assets/screenshot.png" alt="Rhythm Terminal Interface" width="100%">
+  <img src="assets/screenshot.png" alt="Rhythm playing JioSaavn with lyrics" width="100%">
 </p>
 
-| **Live Synced Lyrics (LRCLIB)** | **Theme Switcher (`T`)** |
+| synced lyrics | theme picker |
 |:---:|:---:|
 | <img src="assets/screen3.png" width="100%" alt="Synced Lyrics"> | <img src="assets/screen1.png" width="100%" alt="Themes"> |
-| **Track Actions Menu (`o`)** | **Shortcuts Overlay (`?`)** |
-| <img src="assets/screen4.png" width="100%" alt="Actions Menu"> | <img src="assets/screen2.png" width="100%" alt="Shortcuts"> |
-
-- [x] [**Latest Release Binaries**](https://github.com/aikyaam/rhythm/releases/latest)
-- [x] [**Explore Server Setup & Examples**](#examples)
+| track actions | shortcuts |
+| <img src="assets/screen4.png" width="100%" alt="Actions"> | <img src="assets/screen2.png" width="100%" alt="Shortcuts"> |
 
 ---
 
-## Examples
+## examples
 
-### 1. Running Standalone Local Music TUI
-
-Simply launch the binary to enter the interactive player:
-
+**just run it:**
 ```bash
 rhythm
 ```
 
-Press <kbd>/</kbd> to search for any song or artist across SoundCloud, JioSaavn, Gaana, and Tidal.
-
-### 2. Running a Home Lab Audio Server on Linux / Raspberry Pi
-
-Run the headless server attached to your sound system or DAC:
-
+**server on a pi:**
 ```bash
+# on the pi
 rhythm-server --port 8080 --music-dir /mnt/nas/music
-```
 
-Now connect to your home sound system from any laptop or desktop on your network:
-
-```bash
+# on your laptop
 rhythm --server http://raspberrypi.local:8080
 ```
 
-### 3. Running as a Systemd Service
+**systemd service** (so it starts on boot):
 
-Create `/etc/systemd/system/rhythm-server.service`:
-
+`/etc/systemd/system/rhythm-server.service`:
 ```ini
 [Unit]
-Description=Rhythm Headless Audio Server
+Description=Rhythm Server
 After=sound.target network.target
 
 [Service]
@@ -205,13 +169,10 @@ Type=simple
 User=music
 ExecStart=/usr/local/bin/rhythm-server --port 8080 --music-dir /srv/music
 Restart=always
-RestartSec=5
 
 [Install]
 WantedBy=multi-user.target
 ```
-
-Enable and start the service:
 
 ```bash
 sudo systemctl daemon-reload
@@ -220,6 +181,6 @@ sudo systemctl enable --now rhythm-server
 
 ---
 
-## License
+## license
 
-Distributed under the [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](https://github.com/aikyaam/rhythm/blob/main/LICENSE). See [LICENSE](LICENSE) for more information.
+MIT — see [LICENSE](LICENSE).
