@@ -1,4 +1,6 @@
 bin/
+rhythm
+rhythm-server
 *.exe
 *.exe~
 *.db
