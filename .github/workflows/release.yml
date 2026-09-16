@@ -5,6 +5,11 @@ on:
     tags:
       - 'v*'
   workflow_dispatch:
+    inputs:
+      tag_name:
+        description: 'Tag name for release (e.g. v0.1.0)'
+        required: false
+        default: 'v0.1.0'
 
 permissions:
   contents: write
@@ -13,6 +18,8 @@ jobs:
   build:
     name: Build (${{ matrix.goos }}/${{ matrix.goarch }})
     runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.vars.outputs.VERSION }}
     strategy:
       fail-fast: false
       matrix:
@@ -51,8 +58,10 @@ jobs:
         run: |
           if [[ "${{ github.ref }}" == refs/tags/* ]]; then
             echo "VERSION=${GITHUB_REF#refs/tags/}" >> $GITHUB_OUTPUT
+          elif [[ -n "${{ github.event.inputs.tag_name }}" ]]; then
+            echo "VERSION=${{ github.event.inputs.tag_name }}" >> $GITHUB_OUTPUT
           else
-            echo "VERSION=dev-$(git rev-parse --short HEAD)" >> $GITHUB_OUTPUT
+            echo "VERSION=v0.1.0" >> $GITHUB_OUTPUT
           fi
 
       - name: Build binaries
@@ -117,8 +126,9 @@ jobs:
 
       - name: Publish GitHub Release
         uses: softprops/action-gh-release@v2
-        if: startsWith(github.ref, 'refs/tags/')
+        if: startsWith(github.ref, 'refs/tags/') || github.event_name == 'workflow_dispatch'
         with:
+          tag_name: ${{ needs.build.outputs.version }}
           files: release_assets/*
           generate_release_notes: true
           draft: false
