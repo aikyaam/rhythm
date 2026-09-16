@@ -95,34 +95,8 @@ go build -trimpath -ldflags="-s -w" -o bin/rhythm-server ./cmd/rhythm-server
 
 Rhythm can run in two modes depending on your workflow:
 
-```
-┌─────────────────────────────────────────────────────────────┐
-│                       STANDALONE MODE                       │
-│                                                             │
-│   ┌───────────────┐     Audio Engine     ┌───────────────┐  │
-│   │ Bubbletea TUI ├─────────────────────►│ Local Speaker │  │
-│   └───────┬───────┘   (Pure Go / Oto)    └───────────────┘  │
-│           │                                                 │
-│           ▼                                                 │
-│    Providers Engine (SoundCloud, JioSaavn, Gaana, Tidal)    │
-└─────────────────────────────────────────────────────────────┘
-
-┌─────────────────────────────────────────────────────────────┐
-│                    CLIENT / SERVER MODE                     │
-│                                                             │
-│   ┌───────────────┐        REST / WS      ┌───────────────┐ │
-│   │  Remote TUI   ├──────────────────────►│ rhythm-server │ │
-│   │   (Laptop)    │                       │  (VPS / NAS)  │ │
-│   └───────────────┘                       └───────┬───────┘ │
-│                                                   │ (Oto)   │
-│                                                   ▼         │
-│                                              Home Sound     │
-│                                                System       │
-└─────────────────────────────────────────────────────────────┘
-```
-
-1. **Standalone Mode**: The default mode. Running `rhythm` boots both the local audio engine and the interactive Bubbletea interface inside your active terminal.
-2. **Server / Daemon Mode**: Running `rhythm-server` boots a headless HTTP & WebSocket control daemon on your server or NAS. You can connect to it remotely via `rhythm --server http://nas-ip:8080` to manage queues and stream playback.
+- **Standalone Mode**: The default mode. Running `rhythm` boots both the local audio engine and the interactive Bubbletea interface inside your active terminal.
+- **Server / Daemon Mode**: Running `rhythm-server` boots a headless HTTP & WebSocket control daemon on your server or NAS. You can connect to it remotely via `rhythm --server http://nas-ip:8080` to manage queues and stream playback.
 
 ---
 
@@ -174,29 +148,9 @@ Usage of rhythm-server:
 
 ## Demo
 
-Experience the clean terminal aesthetics of Rhythm:
-
-```text
- ┌── [Rhythm Player] ─────────────────────────────────────────────────────────────┐
- │                                                                               │
- │   ▄▄▄▄▄▄▄▄▄▄▄▄▄   Now Playing: Starboy                                        │
- │   █████████████   Artist:      The Weeknd, Daft Punk                          │
- │   █████████████   Source:      JioSaavn [320kbps Lossless]                    │
- │   █████████████   Status:      ● PLAYING                                      │
- │   ▀▀▀▀▀▀▀▀▀▀▀▀▀                                                               │
- │                   01:24 [━━━━━━━━━━━━━●──────────────────────────] 03:50      │
- │                                                                               │
- ├────────────────────────────────┬──────────────────────────────────────────────┤
- │  Active Search / Queue         │  Synchronized Lyrics (LRCLIB)                │
- │                                │                                              │
- │  > 01. Starboy - The Weeknd    │     I'm tryna put you in the worst mood, ah  │
- │    02. Party Monster           │     P1 cleaner than your church shoes, ah    │
- │    03. False Alarm             │  ▶  Milli point two just to hurt you, ah    │
- │    04. Reminder                │     All red Lamb' just to tease you, ah      │
- │    05. Rockin'                 │                                              │
- └────────────────────────────────┴──────────────────────────────────────────────┘
- [SPACE] Play/Pause  [/] Search  [TAB] Switch View  [L] Lyrics  [Q] Quit
-```
+Experience Rhythm in action directly from your terminal or explore the repository releases:
+- [x] [**Latest Release Binaries**](https://github.com/aikyaam/rhythm/releases/latest)
+- [x] [**Explore Server Setup & Examples**](#examples)
 
 ---
 
