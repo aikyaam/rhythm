@@ -1,0 +1,125 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    name: Build (${{ matrix.goos }}/${{ matrix.goarch }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - goos: linux
+            goarch: amd64
+            archive: tar.gz
+          - goos: linux
+            goarch: arm64
+            archive: tar.gz
+          - goos: darwin
+            goarch: amd64
+            archive: tar.gz
+          - goos: darwin
+            goarch: arm64
+            archive: tar.gz
+          - goos: windows
+            goarch: amd64
+            archive: zip
+          - goos: windows
+            goarch: arm64
+            archive: zip
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: 'stable'
+          check-latest: true
+
+      - name: Determine tag / version
+        id: vars
+        run: |
+          if [[ "${{ github.ref }}" == refs/tags/* ]]; then
+            echo "VERSION=${GITHUB_REF#refs/tags/}" >> $GITHUB_OUTPUT
+          else
+            echo "VERSION=dev-$(git rev-parse --short HEAD)" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Build binaries
+        env:
+          GOOS: ${{ matrix.goos }}
+          GOARCH: ${{ matrix.goarch }}
+          CGO_ENABLED: 0
+        run: |
+          BIN_EXT=""
+          if [ "${{ matrix.goos }}" = "windows" ]; then
+            BIN_EXT=".exe"
+          fi
+          
+          mkdir -p build_output
+          go build -trimpath -ldflags="-s -w -X 'main.Version=${{ steps.vars.outputs.VERSION }}'" -o "build_output/rhythm${BIN_EXT}" ./cmd/rhythm
+          go build -trimpath -ldflags="-s -w -X 'main.Version=${{ steps.vars.outputs.VERSION }}'" -o "build_output/rhythm-server${BIN_EXT}" ./cmd/rhythm-server
+
+      - name: Package artifacts
+        run: |
+          ARCHIVE_NAME="rhythm-${{ steps.vars.outputs.VERSION }}-${{ matrix.goos }}-${{ matrix.goarch }}"
+          mkdir -p dist "${ARCHIVE_NAME}"
+          
+          cp build_output/* "${ARCHIVE_NAME}/"
+          cp LICENSE "${ARCHIVE_NAME}/" || true
+          cp README.md "${ARCHIVE_NAME}/" || true
+
+          if [ "${{ matrix.archive }}" = "zip" ]; then
+            zip -r "dist/${ARCHIVE_NAME}.zip" "${ARCHIVE_NAME}"
+          else
+            tar -czvf "dist/${ARCHIVE_NAME}.tar.gz" "${ARCHIVE_NAME}"
+          fi
+
+      - name: Upload artifact for release
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-${{ matrix.goos }}-${{ matrix.goarch }}
+          path: dist/*
+          retention-days: 1
+
+  release:
+    name: Create GitHub Release
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Download all built artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+          pattern: release-*
+          merge-multiple: true
+
+      - name: Generate Checksums
+        run: |
+          mkdir -p release_assets
+          cp artifacts/* release_assets/
+          cd release_assets
+          sha256sum * > SHA256SUMS.txt
+          cd ..
+
+      - name: Publish GitHub Release
+        uses: softprops/action-gh-release@v2
+        if: startsWith(github.ref, 'refs/tags/')
+        with:
+          files: release_assets/*
+          generate_release_notes: true
+          draft: false
+          prerelease: false
